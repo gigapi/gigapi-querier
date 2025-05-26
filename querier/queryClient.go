@@ -42,7 +42,7 @@ func NewQueryClient(dataDir string) *QueryClient {
 // Initialize sets up the DuckDB connection
 func (q *QueryClient) Initialize() error {
 	var err error
-	db, err = sql.Open("duckdb", "?allow_unsigned_extensions=1")
+	db, err = sql.Open("duckdb", "?access_mode=READ_WRITE&allow_unsigned_extensions=1")
 	if err != nil {
 		return fmt.Errorf("failed to initialize DuckDB: %v", err)
 	}
