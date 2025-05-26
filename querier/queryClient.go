@@ -40,7 +40,7 @@ func NewQueryClient(dataDir string) *QueryClient {
 // Initialize sets up the DuckDB connection
 func (q *QueryClient) Initialize() error {
 	var err error
-	db, err = sql.Open("duckdb", "?access_mode=READ_WRITE")
+	db, err = sql.Open("duckdb", "?access_mode=READ_WRITE&allow_unsigned_extensions=1")
 	if err != nil {
 		return fmt.Errorf("failed to initialize DuckDB: %v", err)
 	}
@@ -117,7 +117,7 @@ func (q *QueryClient) ParseQuery(sql, dbName string) (*ParsedQuery, error) {
 	// Extract time range
 	timeRange := q.extractTimeRange(whereClause)
 	if timeRange.Start != nil || timeRange.End != nil {
-		log.Printf("Detected time range: %v to %v", 
+		log.Printf("Detected time range: %v to %v",
 			time.Unix(0, *timeRange.Start).Format(time.RFC3339Nano),
 			time.Unix(0, *timeRange.End).Format(time.RFC3339Nano))
 	} else {
@@ -187,23 +187,23 @@ func (q *QueryClient) extractTimeRange(whereClause string) TimeRange {
 		regexp.MustCompile(`time\s*(<=|<)\s*'([^']+)'`),                    // time <= '2023-01-01T00:00:00Z'
 		regexp.MustCompile(`time\s*=\s*'([^']+)'`),                         // time = '2023-01-01T00:00:00Z'
 		regexp.MustCompile(`time\s+BETWEEN\s+'([^']+)'\s+AND\s+'([^']+)'`), // time BETWEEN '...' AND '...'
-		
+
 		// Cast format
-		regexp.MustCompile(`time\s*(>=|>)\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)`),                    // time >= cast('2023-01-01T00:00:00' as timestamp)
-		regexp.MustCompile(`time\s*(<=|<)\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)`),                    // time <= cast('2023-01-01T00:00:00' as timestamp)
-		regexp.MustCompile(`time\s*=\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)`),                         // time = cast('2023-01-01T00:00:00' as timestamp)
+		regexp.MustCompile(`time\s*(>=|>)\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)`),                                                      // time >= cast('2023-01-01T00:00:00' as timestamp)
+		regexp.MustCompile(`time\s*(<=|<)\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)`),                                                      // time <= cast('2023-01-01T00:00:00' as timestamp)
+		regexp.MustCompile(`time\s*=\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)`),                                                           // time = cast('2023-01-01T00:00:00' as timestamp)
 		regexp.MustCompile(`time\s+BETWEEN\s+cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)\s+AND\s+cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)`), // time BETWEEN cast('...') AND cast('...')
-		
+
 		// Epoch_ns format
-		regexp.MustCompile(`time\s*(>=|>)\s*epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)`),                    // time >= epoch_ns('2023-01-01T00:00:00'::TIMESTAMP)
-		regexp.MustCompile(`time\s*(<=|<)\s*epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)`),                    // time <= epoch_ns('2023-01-01T00:00:00'::TIMESTAMP)
-		regexp.MustCompile(`time\s*=\s*epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)`),                         // time = epoch_ns('2023-01-01T00:00:00'::TIMESTAMP)
+		regexp.MustCompile(`time\s*(>=|>)\s*epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)`),                                                         // time >= epoch_ns('2023-01-01T00:00:00'::TIMESTAMP)
+		regexp.MustCompile(`time\s*(<=|<)\s*epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)`),                                                         // time <= epoch_ns('2023-01-01T00:00:00'::TIMESTAMP)
+		regexp.MustCompile(`time\s*=\s*epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)`),                                                              // time = epoch_ns('2023-01-01T00:00:00'::TIMESTAMP)
 		regexp.MustCompile(`time\s+BETWEEN\s+epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)\s+AND\s+epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)`), // time BETWEEN epoch_ns('...') AND epoch_ns('...')
 
 		// Epoch_ns with cast format
-		regexp.MustCompile(`time\s*(>=|>)\s*epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)`),                    // time >= epoch_ns(cast('2023-01-01T00:00:00' as timestamp)::TIMESTAMP)
-		regexp.MustCompile(`time\s*(<=|<)\s*epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)`),                    // time <= epoch_ns(cast('2023-01-01T00:00:00' as timestamp)::TIMESTAMP)
-		regexp.MustCompile(`time\s*=\s*epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)`),                         // time = epoch_ns(cast('2023-01-01T00:00:00' as timestamp)::TIMESTAMP)
+		regexp.MustCompile(`time\s*(>=|>)\s*epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)`),                                                                                           // time >= epoch_ns(cast('2023-01-01T00:00:00' as timestamp)::TIMESTAMP)
+		regexp.MustCompile(`time\s*(<=|<)\s*epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)`),                                                                                           // time <= epoch_ns(cast('2023-01-01T00:00:00' as timestamp)::TIMESTAMP)
+		regexp.MustCompile(`time\s*=\s*epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)`),                                                                                                // time = epoch_ns(cast('2023-01-01T00:00:00' as timestamp)::TIMESTAMP)
 		regexp.MustCompile(`time\s+BETWEEN\s+epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)\s+AND\s+epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)`), // time BETWEEN epoch_ns(cast('...')::TIMESTAMP) AND epoch_ns(cast('...')::TIMESTAMP)
 	}
 
@@ -303,10 +303,10 @@ func (q *QueryClient) extractTimeRange(whereClause string) TimeRange {
 		endNano := endTime.UnixNano()
 		timeRange.End = &endNano
 		if timeRange.TimeCondition != "" {
-			timeRange.TimeCondition = fmt.Sprintf("%s AND time %s epoch_ns('%s'::TIMESTAMP)", 
+			timeRange.TimeCondition = fmt.Sprintf("%s AND time %s epoch_ns('%s'::TIMESTAMP)",
 				timeRange.TimeCondition, endOp, endTime.Format(time.RFC3339))
 		} else {
-			timeRange.TimeCondition = fmt.Sprintf("time %s epoch_ns('%s'::TIMESTAMP)", 
+			timeRange.TimeCondition = fmt.Sprintf("time %s epoch_ns('%s'::TIMESTAMP)",
 				endOp, endTime.Format(time.RFC3339))
 		}
 	}
@@ -401,7 +401,7 @@ func (q *QueryClient) FindRelevantFiles(ctx context.Context, dbName, measurement
 
 	var relevantFiles []string
 	// log.Printf("Getting relevant files for %s.%s within time range %v to %v", dbName, measurement,
-		// time.Unix(0, *timeRange.Start), time.Unix(0, *timeRange.End))
+	// time.Unix(0, *timeRange.Start), time.Unix(0, *timeRange.End))
 	start := time.Now()
 	defer func() {
 		log.Printf("Found %d files in: %v", len(relevantFiles), time.Since(start))
