@@ -75,6 +75,22 @@ type TimeRange struct {
 	TimeField     string // The field used for time boundaries
 }
 
+var (
+	columnsPattern    = regexp.MustCompile(`(?i)SELECT\s+(.*?)\s+FROM`)
+	fromPattern       = regexp.MustCompile(`(?i)FROM\s+(?:(\w+)\.)?(\w+)`)
+	orderByPattern    = regexp.MustCompile(`(?i)ORDER\s+BY\s+(.*?)(?:\s+(?:LIMIT|GROUP|HAVING|$))`)
+	groupByPattern    = regexp.MustCompile(`(?i)GROUP\s+BY\s+(.*?)(?:\s+(?:ORDER|LIMIT|HAVING|$))`)
+	havingPattern     = regexp.MustCompile(`(?i)HAVING\s+(.*?)(?:\s+(?:ORDER|LIMIT|$))`)
+	limitPattern      = regexp.MustCompile(`(?i)LIMIT\s+(\d+)`)
+	geCastRe          = regexp.MustCompile(`([a-zA-Z0-9_]+)\s*>=\s*cast\('([\w\-:T\.Z]+)'\s+as\s+timestamp\)`)
+	leCastRe          = regexp.MustCompile(`([a-zA-Z0-9_]+)\s*<=\s*cast\('([\w\-:T\.Z]+)'\s+as\s+timestamp\)`)
+	geRe              = regexp.MustCompile(`([a-zA-Z0-9_]+)\s*>=\s+'?([\w\-:T\.Z]+)'?`)
+	leRe              = regexp.MustCompile(`([a-zA-Z0-9_]+)\s*<=\s+'?([\w\-:T\.Z]+)'?`)
+	betweenRe         = regexp.MustCompile(`([a-zA-Z0-9_]+)\s+BETWEEN\s+'?([\w\-:T\.Z]+)'?\s+AND\s+'?([\w\-:T\.Z]+)'?`)
+	eqCastRe          = regexp.MustCompile(`([a-zA-Z0-9_]+)\s*=\s*cast\('([\w\-:T\.Z]+)'\s+as\s+timestamp\)`)
+	eqRe              = regexp.MustCompile(`([a-zA-Z0-9_]+)\s*=\s+'?([\w\-:T\.Z]+)'?`)
+)
+
 // Parse SQL query to extract components
 func (q *QueryClient) ParseQuery(sql, dbName string) (*ParsedQuery, error) {
 	// Normalize whitespace
@@ -141,14 +157,12 @@ func (q *QueryClient) ParseQuery(sql, dbName string) (*ParsedQuery, error) {
 
 // Fallback: old regex-based logic
 func (q *QueryClient) parseQueryRegex(sql, dbName string) (*ParsedQuery, error) {
-	columnsPattern := regexp.MustCompile(`(?i)SELECT\s+(.*?)\s+FROM`)
 	columnsMatch := columnsPattern.FindStringSubmatch(sql)
 	columns := "*"
 	if len(columnsMatch) > 1 {
 		columns = strings.TrimSpace(columnsMatch[1])
 	}
 
-	fromPattern := regexp.MustCompile(`(?i)FROM\s+(?:(\w+)\.)?(\w+)`)
 	fromMatch := fromPattern.FindStringSubmatch(sql)
 	if len(fromMatch) < 3 {
 		return nil, fmt.Errorf("invalid query: FROM clause not found or invalid")
@@ -179,7 +193,7 @@ func (q *QueryClient) parseQueryRegex(sql, dbName string) (*ParsedQuery, error) 
 	// We'll scan for all >= and <= (with and without cast) and set the field if both are present for the same field
 	fields := make(map[string]int)
 	// >= with cast
-	geCastRe := regexp.MustCompile(`([a-zA-Z0-9_]+)\s*>=\s*cast\('([\w\-:T\.Z]+)'\s+as\s+timestamp\)`)
+	geCastRe.FindAllStringSubmatch(whereClause, -1)
 	for _, m := range geCastRe.FindAllStringSubmatch(whereClause, -1) {
 		fields[m[1]]++
 		if start, ok := parseTimeString(m[2]); ok {
@@ -187,7 +201,7 @@ func (q *QueryClient) parseQueryRegex(sql, dbName string) (*ParsedQuery, error) 
 		}
 	}
 	// <= with cast
-	leCastRe := regexp.MustCompile(`([a-zA-Z0-9_]+)\s*<=\s*cast\('([\w\-:T\.Z]+)'\s+as\s+timestamp\)`)
+	leCastRe.FindAllStringSubmatch(whereClause, -1)
 	for _, m := range leCastRe.FindAllStringSubmatch(whereClause, -1) {
 		fields[m[1]]++
 		if end, ok := parseTimeString(m[2]); ok {
@@ -195,7 +209,7 @@ func (q *QueryClient) parseQueryRegex(sql, dbName string) (*ParsedQuery, error) 
 		}
 	}
 	// >=
-	geRe := regexp.MustCompile(`([a-zA-Z0-9_]+)\s*>=\s+'?([\w\-:T\.Z]+)'?`)
+	geRe.FindAllStringSubmatch(whereClause, -1)
 	for _, m := range geRe.FindAllStringSubmatch(whereClause, -1) {
 		fields[m[1]]++
 		if start, ok := parseTimeString(m[2]); ok {
@@ -203,7 +217,7 @@ func (q *QueryClient) parseQueryRegex(sql, dbName string) (*ParsedQuery, error) 
 		}
 	}
 	// <=
-	leRe := regexp.MustCompile(`([a-zA-Z0-9_]+)\s*<=\s+'?([\w\-:T\.Z]+)'?`)
+	leRe.FindAllStringSubmatch(whereClause, -1)
 	for _, m := range leRe.FindAllStringSubmatch(whereClause, -1) {
 		fields[m[1]]++
 		if end, ok := parseTimeString(m[2]); ok {
@@ -211,7 +225,7 @@ func (q *QueryClient) parseQueryRegex(sql, dbName string) (*ParsedQuery, error) 
 		}
 	}
 	// BETWEEN (no backreferences)
-	betweenRe := regexp.MustCompile(`([a-zA-Z0-9_]+)\s+BETWEEN\s+'?([\w\-:T\.Z]+)'?\s+AND\s+'?([\w\-:T\.Z]+)'?`)
+	betweenRe.FindStringSubmatch(whereClause)
 	if m := betweenRe.FindStringSubmatch(whereClause); len(m) == 4 {
 		fields[m[1]] += 2
 		if start, ok := parseTimeString(m[2]); ok {
@@ -222,7 +236,7 @@ func (q *QueryClient) parseQueryRegex(sql, dbName string) (*ParsedQuery, error) 
 		}
 	}
 	// = with cast
-	eqCastRe := regexp.MustCompile(`([a-zA-Z0-9_]+)\s*=\s*cast\('([\w\-:T\.Z]+)'\s+as\s+timestamp\)`)
+	eqCastRe.FindStringSubmatch(whereClause)
 	if m := eqCastRe.FindStringSubmatch(whereClause); len(m) == 3 {
 		fields[m[1]] += 2
 		if val, ok := parseTimeString(m[2]); ok {
@@ -231,7 +245,7 @@ func (q *QueryClient) parseQueryRegex(sql, dbName string) (*ParsedQuery, error) 
 		}
 	}
 	// =
-	eqRe := regexp.MustCompile(`([a-zA-Z0-9_]+)\s*=\s+'?([\w\-:T\.Z]+)'?`)
+	eqRe.FindStringSubmatch(whereClause)
 	if m := eqRe.FindStringSubmatch(whereClause); len(m) == 3 {
 		fields[m[1]] += 2
 		if val, ok := parseTimeString(m[2]); ok {
@@ -250,28 +264,24 @@ func (q *QueryClient) parseQueryRegex(sql, dbName string) (*ParsedQuery, error) 
 	}
 
 	orderBy := ""
-	orderByPattern := regexp.MustCompile(`(?i)ORDER\s+BY\s+(.*?)(?:\s+(?:LIMIT|GROUP|HAVING|$))`)
 	orderByMatch := orderByPattern.FindStringSubmatch(sql)
 	if len(orderByMatch) > 1 {
 		orderBy = strings.TrimSpace(orderByMatch[1])
 	}
 
 	groupBy := ""
-	groupByPattern := regexp.MustCompile(`(?i)GROUP\s+BY\s+(.*?)(?:\s+(?:ORDER|LIMIT|HAVING|$))`)
 	groupByMatch := groupByPattern.FindStringSubmatch(sql)
 	if len(groupByMatch) > 1 {
 		groupBy = strings.TrimSpace(groupByMatch[1])
 	}
 
 	having := ""
-	havingPattern := regexp.MustCompile(`(?i)HAVING\s+(.*?)(?:\s+(?:ORDER|LIMIT|$))`)
 	havingMatch := havingPattern.FindStringSubmatch(sql)
 	if len(havingMatch) > 1 {
 		having = strings.TrimSpace(havingMatch[1])
 	}
 
 	limit := 0
-	limitPattern := regexp.MustCompile(`(?i)LIMIT\s+(\d+)`)
 	limitMatch := limitPattern.FindStringSubmatch(sql)
 	if len(limitMatch) > 1 {
 		fmt.Sscanf(limitMatch[1], "%d", &limit)
