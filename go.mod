@@ -2,8 +2,6 @@ module github.com/gigapi/gigapi-querier
 
 go 1.24.2
 
-//replace github.com/gigapi/metadata v0.0.2 => ../../../metadata
-
 require (
 	github.com/apache/arrow/go/v14 v14.0.2
 	github.com/gigapi/gigapi-config v0.0.7
