@@ -5,76 +5,6 @@ import (
 	"time"
 )
 
-func TestExtractTimeRange(t *testing.T) {
-	tests := []struct {
-		name        string
-		whereClause string
-		wantStart   string
-		wantEnd     string
-	}{
-		{
-			name:        "Simple timestamp comparison",
-			whereClause: "time >= '2023-01-01T00:00:00Z' AND time <= '2023-01-02T00:00:00Z'",
-			wantStart:   "2023-01-01T00:00:00Z",
-			wantEnd:     "2023-01-02T00:00:00Z",
-		},
-		{
-			name:        "Cast timestamp comparison",
-			whereClause: "time >= cast('2023-01-01T00:00:00Z' as timestamp) AND time <= cast('2023-01-02T00:00:00Z' as timestamp)",
-			wantStart:   "2023-01-01T00:00:00Z",
-			wantEnd:     "2023-01-02T00:00:00Z",
-		},
-		{
-			name:        "Epoch_ns timestamp comparison",
-			whereClause: "time >= epoch_ns('2023-01-01T00:00:00'::TIMESTAMP) AND time <= epoch_ns('2023-01-02T00:00:00'::TIMESTAMP)",
-			wantStart:   "2023-01-01T00:00:00Z",
-			wantEnd:     "2023-01-02T00:00:00Z",
-		},
-		{
-			name:        "Epoch_ns with cast",
-			whereClause: "time >= epoch_ns(cast('2023-01-01T00:00:00' as timestamp)::TIMESTAMP) AND time <= epoch_ns(cast('2023-01-02T00:00:00' as timestamp)::TIMESTAMP)",
-			wantStart:   "2023-01-01T00:00:00Z",
-			wantEnd:     "2023-01-02T00:00:00Z",
-		},
-		{
-			name:        "Single timestamp comparison",
-			whereClause: "time = '2023-01-01T00:00:00Z'",
-			wantStart:   "2023-01-01T00:00:00Z",
-			wantEnd:     "2023-01-01T00:00:00Z",
-		},
-		{
-			name:        "Between timestamp",
-			whereClause: "time BETWEEN '2023-01-01T00:00:00Z' AND '2023-01-02T00:00:00Z'",
-			wantStart:   "2023-01-01T00:00:00Z",
-			wantEnd:     "2023-01-02T00:00:00Z",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			q := &QueryClient{}
-			got := q.extractTimeRange(tt.whereClause)
-
-			// Check if we got a time range
-			if got.Start == nil || got.End == nil {
-				t.Errorf("extractTimeRange() got nil time range")
-				return
-			}
-
-			// Convert timestamps to strings for comparison
-			gotStart := time.Unix(0, *got.Start).UTC().Format(time.RFC3339)
-			gotEnd := time.Unix(0, *got.End).UTC().Format(time.RFC3339)
-
-			if gotStart != tt.wantStart {
-				t.Errorf("extractTimeRange() start = %v, want %v", gotStart, tt.wantStart)
-			}
-			if gotEnd != tt.wantEnd {
-				t.Errorf("extractTimeRange() end = %v, want %v", gotEnd, tt.wantEnd)
-			}
-		})
-	}
-}
-
 func TestParseQuery(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -154,6 +84,61 @@ func TestParseQuery(t *testing.T) {
 				}
 			} else if *got.TimeRange.End != *tt.want.TimeRange.End {
 				t.Errorf("ParseQuery() timeRange.End = %v, want %v", *got.TimeRange.End, *tt.want.TimeRange.End)
+			}
+		})
+	}
+}
+
+func TestParseQuery_TimeExtraction(t *testing.T) {
+	tests := []struct {
+		name    string
+		query   string
+		dbName  string
+		wantStart int64
+		wantEnd   int64
+		wantErr bool
+	}{
+		{
+			name:   ">= and <= time range",
+			query:  "SELECT * FROM mydb.mytable WHERE time >= '2024-01-01T00:00:00Z' AND time <= '2024-01-02T00:00:00Z'",
+			dbName: "mydb",
+			wantStart: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano(),
+			wantEnd:   time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC).UnixNano(),
+			wantErr: false,
+		},
+		{
+			name:   "= time equality",
+			query:  "SELECT * FROM mydb.mytable WHERE time = '2024-01-01T12:00:00Z'",
+			dbName: "mydb",
+			wantStart: time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC).UnixNano(),
+			wantEnd:   time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC).UnixNano(),
+			wantErr: false,
+		},
+		{
+			name:   "BETWEEN time range",
+			query:  "SELECT * FROM mydb.mytable WHERE time BETWEEN 1747738272042000000 AND 1748343072042000000",
+			dbName: "mydb",
+			wantStart: 1747738272042000000,
+			wantEnd:   1748343072042000000,
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q := &QueryClient{}
+			parsed, err := q.ParseQuery(tt.query, tt.dbName)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ParseQuery() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if parsed == nil {
+				t.Fatalf("ParseQuery() returned nil parsed query")
+			}
+			if parsed.TimeRange.Start == nil || *parsed.TimeRange.Start != tt.wantStart {
+				t.Errorf("Start = %v, want %v", parsed.TimeRange.Start, tt.wantStart)
+			}
+			if parsed.TimeRange.End == nil || *parsed.TimeRange.End != tt.wantEnd {
+				t.Errorf("End = %v, want %v", parsed.TimeRange.End, tt.wantEnd)
 			}
 		})
 	}
