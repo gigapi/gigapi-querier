@@ -6,6 +6,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/gigapi/gigapi-config/config"
+	"github.com/gigapi/metadata"
 	"log"
 	"os"
 	"path/filepath"
@@ -390,15 +392,20 @@ func (q *QueryClient) enumFolderNoMetadata(path string) ([]string, error) {
 	return res, nil
 }
 
+func getIndex(db, measurement string) (metadata.TableIndex, error) {
+	switch config.Config.Gigapi.Metadata.Type {
+	case "json":
+		return metadata.NewJSONIndex(config.Config.Gigapi.Root, db, measurement), nil
+	case "redis":
+		return metadata.NewRedisIndex(config.Config.Gigapi.Metadata.URL, db, measurement)
+	}
+	return nil, fmt.Errorf("Unsupported index " + config.Config.Gigapi.Metadata.Type)
+}
+
 // Find relevant parquet files based on time range
 func (q *QueryClient) FindRelevantFiles(ctx context.Context, dbName, measurement string,
 	timeRange TimeRange) ([]string, error) {
 	// If no time range specified, get all files
-	if timeRange.Start == nil && timeRange.End == nil {
-		log.Printf("No time range specified, getting all files for %s.%s", dbName, measurement)
-		return q.findAllFiles(ctx, dbName, measurement)
-	}
-
 	var relevantFiles []string
 	// log.Printf("Getting relevant files for %s.%s within time range %v to %v", dbName, measurement,
 	// time.Unix(0, *timeRange.Start), time.Unix(0, *timeRange.End))
@@ -408,65 +415,23 @@ func (q *QueryClient) FindRelevantFiles(ctx context.Context, dbName, measurement
 	}()
 
 	// Convert nanosecond timestamps to time.Time for directory parsing
-	var startDate, endDate time.Time
+	var opts metadata.QueryOptions
 	if timeRange.Start != nil {
-		startDate = time.Unix(0, *timeRange.Start)
-	} else {
-		startDate = time.Unix(0, 0) // Beginning of epoch
+		opts.After = time.Unix(0, *timeRange.Start)
 	}
 
 	if timeRange.End != nil {
-		endDate = time.Unix(0, *timeRange.End)
-	} else {
-		endDate = time.Now() // Current time
+		opts.Before = time.Unix(0, *timeRange.End)
 	}
 
-	// Get all date directories that might contain relevant data
-	// log.Printf("Looking for date directories between %v and %v", startDate, endDate)
-	dateDirectories, err := q.getDateDirectoriesInRange(dbName, measurement, startDate, endDate)
+	idx, err := getIndex(dbName, measurement)
 	if err != nil {
-		log.Printf("Failed to get date directories: %v", err)
 		return nil, err
 	}
-	// log.Printf("Found %d date directories", len(dateDirectories))
 
-	for _, dateDir := range dateDirectories {
-		// For each date directory, get all hour directories
-		datePath := filepath.Join(q.DataDir, dbName, measurement, dateDir)
-		// log.Printf("Processing date directory: %s", datePath)
-
-		hourDirs, err := q.getHourDirectoriesInRange(datePath, startDate, endDate)
-		if err != nil {
-			log.Printf("Failed to get hour directories for %s: %v", datePath, err)
-			continue // Skip this directory on error
-		}
-		// log.Printf("Found %d hour directories in %s", len(hourDirs), dateDir)
-
-		for _, hourDir := range hourDirs {
-			hourPath := filepath.Join(datePath, hourDir)
-			// log.Printf("Processing hour directory: %s", hourPath)
-
-			// Read metadata.json
-			metadataPath := filepath.Join(hourPath, "metadata.json")
-			if _, err := os.Stat(metadataPath); err == nil {
-				// log.Printf("Found metadata.json in %s", hourPath)
-				_relevantFiles, err := q.enumFolderWithMetadata(metadataPath, timeRange)
-				if err == nil {
-					// log.Printf("Found %d files in metadata.json", len(_relevantFiles))
-					relevantFiles = append(relevantFiles, _relevantFiles...)
-					continue
-				}
-				log.Printf("Failed to read metadata.json: %v", err)
-			}
-
-			_relevantFiles, err := q.enumFolderNoMetadata(hourPath)
-			if err == nil {
-				// log.Printf("Found %d files without metadata", len(_relevantFiles))
-				relevantFiles = append(relevantFiles, _relevantFiles...)
-				continue
-			}
-			log.Printf("Failed to enumerate folder: %v", err)
-		}
+	ies, err := idx.GetQuerier().Query(opts)
+	for _, ie := range ies {
+		relevantFiles = append(relevantFiles, filepath.Join(config.Config.Gigapi.Root, dbName, measurement, "data", ie.Path))
 	}
 
 	if len(relevantFiles) == 0 {
