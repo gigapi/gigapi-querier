@@ -91,35 +91,66 @@ func TestParseQuery(t *testing.T) {
 
 func TestParseQuery_TimeExtraction(t *testing.T) {
 	tests := []struct {
-		name    string
-		query   string
-		dbName  string
+		name      string
+		query     string
+		dbName    string
 		wantStart int64
 		wantEnd   int64
-		wantErr bool
+		wantField string
+		wantErr   bool
 	}{
 		{
-			name:   ">= and <= time range",
+			name:   ">= and <= time range (time)",
 			query:  "SELECT * FROM mydb.mytable WHERE time >= '2024-01-01T00:00:00Z' AND time <= '2024-01-02T00:00:00Z'",
 			dbName: "mydb",
 			wantStart: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano(),
 			wantEnd:   time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC).UnixNano(),
+			wantField: "time",
 			wantErr: false,
 		},
 		{
-			name:   "= time equality",
-			query:  "SELECT * FROM mydb.mytable WHERE time = '2024-01-01T12:00:00Z'",
+			name:   "= time equality (timestamp)",
+			query:  "SELECT * FROM mydb.mytable WHERE timestamp = '2024-01-01T12:00:00Z'",
 			dbName: "mydb",
 			wantStart: time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC).UnixNano(),
 			wantEnd:   time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC).UnixNano(),
+			wantField: "timestamp",
 			wantErr: false,
 		},
 		{
-			name:   "BETWEEN time range",
-			query:  "SELECT * FROM mydb.mytable WHERE time BETWEEN 1747738272042000000 AND 1748343072042000000",
+			name:   "BETWEEN time range (__timestamp)",
+			query:  "SELECT * FROM mydb.mytable WHERE __timestamp BETWEEN 1747738272042000000 AND 1748343072042000000",
 			dbName: "mydb",
 			wantStart: 1747738272042000000,
 			wantEnd:   1748343072042000000,
+			wantField: "__timestamp",
+			wantErr: false,
+		},
+		{
+			name:   ">= and <= time range (date)",
+			query:  "SELECT * FROM mydb.mytable WHERE date >= '2024-01-01T00:00:00Z' AND date <= '2024-01-02T00:00:00Z'",
+			dbName: "mydb",
+			wantStart: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano(),
+			wantEnd:   time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC).UnixNano(),
+			wantField: "date",
+			wantErr: false,
+		},
+		{
+			name:   "BETWEEN time range (record_datetime)",
+			query:  "SELECT * FROM mydb.mytable WHERE record_datetime BETWEEN 1747738272042000000 AND 1748343072042000000",
+			dbName: "mydb",
+			wantStart: 1747738272042000000,
+			wantEnd:   1748343072042000000,
+			wantField: "record_datetime",
+			wantErr: false,
+		},
+		{
+			name:   ">= and <= with cast (regex fallback)",
+			query:  "SELECT * FROM mydb.mytable WHERE date >= cast('2024-01-01T00:00:00Z' as timestamp) AND date <= cast('2024-01-02T00:00:00Z' as timestamp)",
+			dbName: "mydb",
+			wantStart: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano(),
+			wantEnd:   time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC).UnixNano(),
+			wantField: "date",
 			wantErr: false,
 		},
 	}
@@ -139,6 +170,9 @@ func TestParseQuery_TimeExtraction(t *testing.T) {
 			}
 			if parsed.TimeRange.End == nil || *parsed.TimeRange.End != tt.wantEnd {
 				t.Errorf("End = %v, want %v", parsed.TimeRange.End, tt.wantEnd)
+			}
+			if parsed.TimeField != tt.wantField {
+				t.Errorf("TimeField = %v, want %v", parsed.TimeField, tt.wantField)
 			}
 		})
 	}

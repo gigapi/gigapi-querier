@@ -65,6 +65,7 @@ type ParsedQuery struct {
 	GroupBy         string
 	Having          string
 	Limit           int
+	TimeField       string // The field used for time boundaries
 }
 
 // TimeRange represents a query time range
@@ -72,6 +73,7 @@ type TimeRange struct {
 	Start         *int64
 	End           *int64
 	TimeCondition string
+	TimeField     string // The field used for time boundaries
 }
 
 // Parse SQL query to extract components
@@ -132,6 +134,7 @@ func (q *QueryClient) ParseQuery(sql, dbName string) (*ParsedQuery, error) {
 		// Extract time range from WHERE
 		tr := extractTimeRangeFromAST(selectStmt.Where)
 		parsed.TimeRange = tr
+		parsed.TimeField = tr.TimeField
 	}
 
 	return parsed, nil
@@ -169,38 +172,81 @@ func (q *QueryClient) parseQueryRegex(sql, dbName string) (*ParsedQuery, error) 
 		}
 	}
 
+	log.Printf("parseQueryRegex: whereClause = %q", whereClause)
 	// Minimal regex-based time extraction
 	timeRange := TimeRange{}
-	// BETWEEN (no backreferences)
-	betweenRe := regexp.MustCompile(`time\s+BETWEEN\s+'?([\w\-:T\.Z]+)'?\s+AND\s+'?([\w\-:T\.Z]+)'?`)
-	if m := betweenRe.FindStringSubmatch(whereClause); len(m) == 3 {
-		if start, ok := parseTimeString(m[1]); ok {
-			timeRange.Start = &start
-		}
-		if end, ok := parseTimeString(m[2]); ok {
-			timeRange.End = &end
-		}
-	}
+	var timeField string
+	// Support for multiple time field matches (e.g., >= and <= with cast for the same field)
+	// We'll scan for all >= and <= (with and without cast) and set the field if both are present for the same field
+	fields := make(map[string]int)
 	// >= with cast
-	geCastRe := regexp.MustCompile(`time\s*>=\s*cast\('([\w\-:T\.Z]+)'\s+as\s+timestamp\)`)
-	if m := geCastRe.FindStringSubmatch(whereClause); len(m) == 2 {
-		if start, ok := parseTimeString(m[1]); ok {
+	geCastRe := regexp.MustCompile(`([a-zA-Z0-9_]+)\s*>=\s*cast\('([\w\-:T\.Z]+)'\s+as\s+timestamp\)`)
+	for _, m := range geCastRe.FindAllStringSubmatch(whereClause, -1) {
+		fields[m[1]]++
+		if start, ok := parseTimeString(m[2]); ok {
 			timeRange.Start = &start
 		}
 	}
 	// <= with cast
-	leCastRe := regexp.MustCompile(`time\s*<=\s*cast\('([\w\-:T\.Z]+)'\s+as\s+timestamp\)`)
-	if m := leCastRe.FindStringSubmatch(whereClause); len(m) == 2 {
-		if end, ok := parseTimeString(m[1]); ok {
+	leCastRe := regexp.MustCompile(`([a-zA-Z0-9_]+)\s*<=\s*cast\('([\w\-:T\.Z]+)'\s+as\s+timestamp\)`)
+	for _, m := range leCastRe.FindAllStringSubmatch(whereClause, -1) {
+		fields[m[1]]++
+		if end, ok := parseTimeString(m[2]); ok {
+			timeRange.End = &end
+		}
+	}
+	// >=
+	geRe := regexp.MustCompile(`([a-zA-Z0-9_]+)\s*>=\s+'?([\w\-:T\.Z]+)'?`)
+	for _, m := range geRe.FindAllStringSubmatch(whereClause, -1) {
+		fields[m[1]]++
+		if start, ok := parseTimeString(m[2]); ok {
+			timeRange.Start = &start
+		}
+	}
+	// <=
+	leRe := regexp.MustCompile(`([a-zA-Z0-9_]+)\s*<=\s+'?([\w\-:T\.Z]+)'?`)
+	for _, m := range leRe.FindAllStringSubmatch(whereClause, -1) {
+		fields[m[1]]++
+		if end, ok := parseTimeString(m[2]); ok {
+			timeRange.End = &end
+		}
+	}
+	// BETWEEN (no backreferences)
+	betweenRe := regexp.MustCompile(`([a-zA-Z0-9_]+)\s+BETWEEN\s+'?([\w\-:T\.Z]+)'?\s+AND\s+'?([\w\-:T\.Z]+)'?`)
+	if m := betweenRe.FindStringSubmatch(whereClause); len(m) == 4 {
+		fields[m[1]] += 2
+		if start, ok := parseTimeString(m[2]); ok {
+			timeRange.Start = &start
+		}
+		if end, ok := parseTimeString(m[3]); ok {
 			timeRange.End = &end
 		}
 	}
 	// = with cast
-	eqCastRe := regexp.MustCompile(`time\s*=\s*cast\('([\w\-:T\.Z]+)'\s+as\s+timestamp\)`)
-	if m := eqCastRe.FindStringSubmatch(whereClause); len(m) == 2 {
-		if val, ok := parseTimeString(m[1]); ok {
+	eqCastRe := regexp.MustCompile(`([a-zA-Z0-9_]+)\s*=\s*cast\('([\w\-:T\.Z]+)'\s+as\s+timestamp\)`)
+	if m := eqCastRe.FindStringSubmatch(whereClause); len(m) == 3 {
+		fields[m[1]] += 2
+		if val, ok := parseTimeString(m[2]); ok {
 			timeRange.Start = &val
 			timeRange.End = &val
+		}
+	}
+	// =
+	eqRe := regexp.MustCompile(`([a-zA-Z0-9_]+)\s*=\s+'?([\w\-:T\.Z]+)'?`)
+	if m := eqRe.FindStringSubmatch(whereClause); len(m) == 3 {
+		fields[m[1]] += 2
+		if val, ok := parseTimeString(m[2]); ok {
+			timeRange.Start = &val
+			timeRange.End = &val
+		}
+	}
+	log.Printf("parseQueryRegex: fields = %+v", fields)
+	// Pick the field with the highest count (most likely the time field)
+	maxCount := 0
+	for f, count := range fields {
+		if count > maxCount {
+			timeField = f
+			maxCount = count
 		}
 	}
 
@@ -232,6 +278,8 @@ func (q *QueryClient) parseQueryRegex(sql, dbName string) (*ParsedQuery, error) 
 		fmt.Sscanf(limitMatch[1], "%d", &limit)
 	}
 
+	timeRange.TimeField = timeField
+
 	return &ParsedQuery{
 		Columns:         columns,
 		DbName:          queryDbName,
@@ -242,6 +290,7 @@ func (q *QueryClient) parseQueryRegex(sql, dbName string) (*ParsedQuery, error) 
 		GroupBy:         groupBy,
 		Having:          having,
 		Limit:           limit,
+		TimeField:       timeField,
 	}, nil
 }
 
@@ -263,6 +312,7 @@ func extractTimeRangeFromAST(where ast.ExprNode) TimeRange {
 		return tr
 	}
 	var start, end *int64
+	var timeField string
 
 	var walk func(n ast.Node)
 	walk = func(n ast.Node) {
@@ -271,8 +321,9 @@ func extractTimeRangeFromAST(where ast.ExprNode) TimeRange {
 		}
 		// Handle binary operations (>=, <=, =, AND, OR)
 		if binOp, ok := n.(*ast.BinaryOperationExpr); ok {
-			if col, ok := binOp.L.(*ast.ColumnNameExpr); ok && strings.ToLower(col.Name.Name.O) == "time" {
+			if col, ok := binOp.L.(*ast.ColumnNameExpr); ok {
 				if ts, ok := isValueExpr(binOp.R); ok {
+					timeField = col.Name.Name.O
 					switch binOp.Op {
 					case opcode.GE, opcode.GT:
 						start = &ts
@@ -291,9 +342,10 @@ func extractTimeRangeFromAST(where ast.ExprNode) TimeRange {
 		}
 		// Handle BETWEEN
 		if between, ok := n.(*ast.BetweenExpr); ok {
-			if col, ok := between.Expr.(*ast.ColumnNameExpr); ok && strings.ToLower(col.Name.Name.O) == "time" {
+			if col, ok := between.Expr.(*ast.ColumnNameExpr); ok {
 				if low, ok := isValueExpr(between.Left); ok {
 					if high, ok2 := isValueExpr(between.Right); ok2 {
+						timeField = col.Name.Name.O
 						start = &low
 						end = &high
 					}
@@ -328,6 +380,7 @@ func extractTimeRangeFromAST(where ast.ExprNode) TimeRange {
 	walk(where)
 	tr.Start = start
 	tr.End = end
+	tr.TimeField = timeField
 	return tr
 }
 
