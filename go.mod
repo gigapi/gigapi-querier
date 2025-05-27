@@ -8,7 +8,7 @@ require (
 	github.com/apache/arrow/go/v14 v14.0.2
 	github.com/gigapi/gigapi-config v0.0.7
 	github.com/gigapi/gigapi/v2 v2.0.13
-	github.com/gigapi/metadata v0.0.2
+	github.com/gigapi/metadata v0.0.3
 	github.com/marcboeker/go-duckdb/v2 v2.2.0
 	github.com/spf13/afero v1.12.0
 	github.com/stretchr/testify v1.10.0
