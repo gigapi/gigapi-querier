@@ -146,23 +146,8 @@ func (s *FlightSQLServer) GetFlightInfo(ctx context.Context, desc *flight.Flight
 				}
 			}
 
-			// Parse the query to extract time range
-			parsed, err := s.queryClient.ParseQuery(query, dbName)
-			if err != nil {
-				log.Printf("Failed to parse query: %v", err)
-				return nil, fmt.Errorf("failed to parse query: %w", err)
-			}
-
-			// Find relevant files based on the parsed query
-			files, err := s.queryClient.FindRelevantFiles(ctx, parsed.DbName, parsed.Measurement, parsed.TimeRange)
-			if err != nil {
-				log.Printf("Failed to find relevant files: %v", err)
-				return nil, fmt.Errorf("failed to find relevant files: %w", err)
-			}
-			log.Printf("Found %d relevant files for query", len(files))
-
-			// Execute the query using our existing QueryClient
-			results, err := s.queryClient.Query(ctx, query, parsed.DbName) // Use the parsed database name
+			// Use QueryClient.Query which now handles all fallback logic
+			results, err := s.queryClient.Query(ctx, query, dbName)
 			if err != nil {
 				log.Printf("Query execution failed: %v", err)
 				return nil, fmt.Errorf("failed to execute query: %w", err)
