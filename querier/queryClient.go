@@ -665,12 +665,65 @@ func (c *QueryClient) Query(ctx context.Context, query, dbName string) ([]map[st
 			}
 		}
 		return results, nil
+
+	// Special InfluxDB IOx compatibility: information_schema.tables
+	case "SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES":
+		// Return SHOW TABLES for the given dbName, but format as []map[string]interface{}{"table_name": ...}
+		tables, err := c.Query(ctx, "SHOW TABLES", dbName)
+		if err != nil {
+			return nil, err
+		}
+		// Only return the "table_name" field, as expected by the client
+		var result []map[string]interface{}
+		for _, t := range tables {
+			if name, ok := t["table_name"]; ok {
+				result = append(result, map[string]interface{}{"table_name": name})
+			}
+		}
+		return result, nil
 	}
 
 	// Parse the query
 	parsed, err := c.ParseQuery(query, dbName)
 	if err != nil {
-		return nil, err
+		// Fallback: Directly execute the query in DuckDB if ParseQuery fails
+		stmt, err2 := c.DB.Prepare(query)
+		if err2 != nil {
+			return nil, fmt.Errorf("failed to prepare query: %v", err2)
+		}
+		defer stmt.Close()
+
+		rows, err2 := stmt.Query()
+		if err2 != nil {
+			return nil, fmt.Errorf("query execution failed: %v", err2)
+		}
+		defer rows.Close()
+
+		columns, err2 := rows.Columns()
+		if err2 != nil {
+			return nil, fmt.Errorf("failed to get columns: %v", err2)
+		}
+
+		var result []map[string]interface{}
+		for rows.Next() {
+			values := make([]interface{}, len(columns))
+			valuePtrs := make([]interface{}, len(columns))
+			for i := range values {
+				valuePtrs[i] = &values[i]
+			}
+			if err := rows.Scan(valuePtrs...); err != nil {
+				return nil, fmt.Errorf("error scanning row: %v", err)
+			}
+			row := make(map[string]interface{})
+			for i, col := range columns {
+				row[col] = values[i]
+			}
+			result = append(result, row)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("error iterating rows: %v", err)
+		}
+		return result, nil
 	}
 
 	// Find relevant files
