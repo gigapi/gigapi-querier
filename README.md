@@ -94,6 +94,9 @@ GigAPI can be used from Grafana using the InfluxDB3 Flight GRPC Datasource
 
 <br>
 
+### Got Questions?
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/gigapi/gigapi-querier)
+
 ## License
 
 <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/0/06/AGPLv3_Logo.svg/2560px-AGPLv3_Logo.svg.png" width=200>
