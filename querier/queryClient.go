@@ -17,6 +17,8 @@ import (
 
 	"github.com/gigapi/gigapi-querier/core"
 	_ "github.com/marcboeker/go-duckdb/v2"
+	"github.com/apache/arrow/go/v14/arrow/array"
+	"github.com/apache/arrow/go/v14/arrow"
 )
 
 var db *sql.DB
@@ -399,7 +401,7 @@ func getIndex(db, measurement string) (metadata.TableIndex, error) {
 	case "redis":
 		return metadata.NewRedisIndex(config.Config.Gigapi.Metadata.URL, db, measurement)
 	}
-	return nil, fmt.Errorf("Unsupported index " + config.Config.Gigapi.Metadata.Type)
+	return nil, fmt.Errorf("Unsupported index %s", config.Config.Gigapi.Metadata.Type)
 }
 
 // Find relevant parquet files based on time range
@@ -781,6 +783,12 @@ func (c *QueryClient) Query(ctx context.Context, query, dbName string) ([]map[st
 	}
 
 	return result, nil
+}
+
+// QueryArrow executes a query against DuckDB and returns an Arrow RecordReader and schema
+func (c *QueryClient) QueryArrow(ctx context.Context, query string) (array.RecordReader, *arrow.Schema, error) {
+	// TODO: Implement Arrow streaming for the current DuckDB Go driver version
+	return nil, nil, fmt.Errorf("Arrow streaming not implemented for this DuckDB Go driver version")
 }
 
 // Close releases resources
