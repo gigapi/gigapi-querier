@@ -48,6 +48,48 @@ func TestExtractTimeRange(t *testing.T) {
 			wantStart:   "2023-01-01T00:00:00Z",
 			wantEnd:     "2023-01-02T00:00:00Z",
 		},
+		{
+			name:        "Between nanosecond timestamps",
+			whereClause: "time BETWEEN 1748452306626000000 AND 1749057106626000000",
+			wantStart:   "2025-05-28T12:31:46.626Z",
+			wantEnd:     "2025-06-04T12:31:46.626Z",
+		},
+		{
+			name:        "Single nanosecond timestamp",
+			whereClause: "time >= 1748452306626000000",
+			wantStart:   "2025-05-28T12:31:46.626Z",
+			wantEnd:     "",
+		},
+		{
+			name:        "Single nanosecond timestamp with less than",
+			whereClause: "time < 1749057106626000000",
+			wantStart:   "",
+			wantEnd:     "2025-06-04T12:31:46.626Z",
+		},
+		{
+			name:        "Equal nanosecond timestamp",
+			whereClause: "time = 1748452306626000000",
+			wantStart:   "2025-05-28T12:31:46.626Z",
+			wantEnd:     "2025-05-28T12:31:46.626Z",
+		},
+		{
+			name:        "Mixed timestamp formats",
+			whereClause: "time >= '2023-01-01T00:00:00Z' AND time <= 1749057106626000000",
+			wantStart:   "2023-01-01T00:00:00Z",
+			wantEnd:     "2025-06-04T12:31:46.626Z",
+		},
+		{
+			name:        "Invalid timestamp format",
+			whereClause: "time >= 'invalid-timestamp'",
+			wantStart:   "",
+			wantEnd:     "",
+		},
+		{
+			name:        "Invalid nanosecond format",
+			whereClause: "time >= 123abc",
+			wantStart:   "",
+			wantEnd:     "",
+		},
 	}
 
 	for _, tt := range tests {
@@ -117,6 +159,96 @@ func TestParseQuery(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name:   "Query with explicit database name",
+			query:  "SELECT * FROM metrics.cpu WHERE time >= '2023-01-01T00:00:00Z'",
+			dbName: "default",
+			want: &ParsedQuery{
+				Columns:     "*",
+				DbName:      "metrics",
+				Measurement: "cpu",
+				TimeRange: TimeRange{
+					Start:         ptr(int64(time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano())),
+					TimeCondition: "time >= epoch_ns('2023-01-01T00:00:00Z'::TIMESTAMP)",
+				},
+				WhereConditions: "time >= '2023-01-01T00:00:00Z'",
+			},
+			wantErr: false,
+		},
+		{
+			name:   "Query without database name",
+			query:  "SELECT * FROM cpu WHERE time >= '2023-01-01T00:00:00Z'",
+			dbName: "metrics",
+			want: &ParsedQuery{
+				Columns:     "*",
+				DbName:      "metrics",
+				Measurement: "cpu",
+				TimeRange: TimeRange{
+					Start:         ptr(int64(time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano())),
+					TimeCondition: "time >= epoch_ns('2023-01-01T00:00:00Z'::TIMESTAMP)",
+				},
+				WhereConditions: "time >= '2023-01-01T00:00:00Z'",
+			},
+			wantErr: false,
+		},
+		{
+			name:   "Query with complex column selection",
+			query:  "SELECT time, value, tag FROM metrics.cpu WHERE time >= '2023-01-01T00:00:00Z' GROUP BY tag",
+			dbName: "default",
+			want: &ParsedQuery{
+				Columns:     "time, value, tag",
+				DbName:      "metrics",
+				Measurement: "cpu",
+				TimeRange: TimeRange{
+					Start:         ptr(int64(time.Date(2023, 1, 1, 0, 0, 0, 0, time.UTC).UnixNano())),
+					TimeCondition: "time >= epoch_ns('2023-01-01T00:00:00Z'::TIMESTAMP)",
+				},
+				WhereConditions: "time >= '2023-01-01T00:00:00Z'",
+				GroupBy:         "tag",
+			},
+			wantErr: false,
+		},
+		{
+			name:   "Query with nanosecond timestamps",
+			query:  "SELECT * FROM metrics.cpu WHERE time BETWEEN 1748452306626000000 AND 1749057106626000000",
+			dbName: "default",
+			want: &ParsedQuery{
+				Columns:     "*",
+				DbName:      "metrics",
+				Measurement: "cpu",
+				TimeRange: TimeRange{
+					Start:         ptr(int64(1748452306626000000)),
+					End:           ptr(int64(1749057106626000000)),
+					TimeCondition: "time >= epoch_ns('2025-05-28T12:31:46.626Z'::TIMESTAMP) AND time <= epoch_ns('2025-06-04T12:31:46.626Z'::TIMESTAMP)",
+				},
+				WhereConditions: "time BETWEEN 1748452306626000000 AND 1749057106626000000",
+			},
+			wantErr: false,
+		},
+		{
+			name:   "Query without time range",
+			query:  "SELECT * FROM metrics.cpu WHERE tag = 'value'",
+			dbName: "default",
+			want: &ParsedQuery{
+				Columns:         "*",
+				DbName:         "metrics",
+				Measurement:    "cpu",
+				WhereConditions: "tag = 'value'",
+			},
+			wantErr: false,
+		},
+		{
+			name:    "Invalid query - missing FROM",
+			query:   "SELECT * WHERE time >= '2023-01-01T00:00:00Z'",
+			dbName:  "default",
+			wantErr: true,
+		},
+		{
+			name:    "Invalid query - malformed table name",
+			query:   "SELECT * FROM metrics..cpu WHERE time >= '2023-01-01T00:00:00Z'",
+			dbName:  "default",
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -125,6 +257,9 @@ func TestParseQuery(t *testing.T) {
 			got, err := q.ParseQuery(tt.query, tt.dbName)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ParseQuery() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr {
 				return
 			}
 
@@ -137,6 +272,12 @@ func TestParseQuery(t *testing.T) {
 			}
 			if got.Measurement != tt.want.Measurement {
 				t.Errorf("ParseQuery() measurement = %v, want %v", got.Measurement, tt.want.Measurement)
+			}
+			if got.WhereConditions != tt.want.WhereConditions {
+				t.Errorf("ParseQuery() whereConditions = %v, want %v", got.WhereConditions, tt.want.WhereConditions)
+			}
+			if got.GroupBy != tt.want.GroupBy {
+				t.Errorf("ParseQuery() groupBy = %v, want %v", got.GroupBy, tt.want.GroupBy)
 			}
 
 			// Compare time range
@@ -154,6 +295,10 @@ func TestParseQuery(t *testing.T) {
 				}
 			} else if *got.TimeRange.End != *tt.want.TimeRange.End {
 				t.Errorf("ParseQuery() timeRange.End = %v, want %v", *got.TimeRange.End, *tt.want.TimeRange.End)
+			}
+
+			if got.TimeRange.TimeCondition != tt.want.TimeRange.TimeCondition {
+				t.Errorf("ParseQuery() timeRange.TimeCondition = %v, want %v", got.TimeRange.TimeCondition, tt.want.TimeRange.TimeCondition)
 			}
 		})
 	}

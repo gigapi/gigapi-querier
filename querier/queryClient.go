@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,117 +64,24 @@ type ParsedQuery struct {
 	Limit           int
 }
 
-// TimeRange represents a query time range
+// TimeRange represents a query time range with start and end timestamps in nanoseconds
 type TimeRange struct {
-	Start         *int64
-	End           *int64
-	TimeCondition string
+	Start         *int64  // Start time in nanoseconds since epoch
+	End           *int64  // End time in nanoseconds since epoch
+	TimeCondition string  // Original time condition from the query
 }
 
-// Parse SQL query to extract components
-func (q *QueryClient) ParseQuery(sql, dbName string) (*ParsedQuery, error) {
-	// Normalize whitespace
-	sql = regexp.MustCompile(`\s+`).ReplaceAllString(sql, " ")
-	sql = strings.TrimSpace(sql)
-
-	log.Printf("Parsing query: %s", sql)
-
-	// Extract columns
-	columnsPattern := regexp.MustCompile(`(?i)SELECT\s+(.*?)\s+FROM`)
-	columnsMatch := columnsPattern.FindStringSubmatch(sql)
-	columns := "*"
-	if len(columnsMatch) > 1 {
-		columns = strings.TrimSpace(columnsMatch[1])
-	}
-
-	// Extract measurement name
-	fromPattern := regexp.MustCompile(`(?i)FROM\s+(?:(\w+)\.)?(\w+)`)
-	fromMatch := fromPattern.FindStringSubmatch(sql)
-	if len(fromMatch) < 3 {
-		return nil, fmt.Errorf("invalid query: FROM clause not found or invalid")
-	}
-
-	// If db name is in the query, use it, otherwise use the provided dbName
-	queryDbName := dbName
-	if fromMatch[1] != "" {
-		queryDbName = fromMatch[1]
-	}
-	measurement := fromMatch[2]
-
-	// Extract WHERE clause
-	whereClause := ""
-	whereParts := strings.Split(sql, " WHERE ")
-	if len(whereParts) >= 2 {
-		whereClause = whereParts[1]
-
-		// Remove other clauses
-		for _, clause := range []string{" GROUP BY ", " ORDER BY ", " LIMIT ", " HAVING "} {
-			if idx := strings.Index(strings.ToUpper(whereClause), clause); idx != -1 {
-				whereClause = whereClause[:idx]
-			}
-		}
-	}
-
-	// log.Printf("Extracted WHERE clause: %s", whereClause)
-
-	// Extract time range
-	timeRange := q.extractTimeRange(whereClause)
-	if timeRange.Start != nil || timeRange.End != nil {
-		log.Printf("Detected time range: %v to %v",
-			time.Unix(0, *timeRange.Start).Format(time.RFC3339Nano),
-			time.Unix(0, *timeRange.End).Format(time.RFC3339Nano))
-	} else {
-		log.Printf("No time range detected in WHERE clause")
-	}
-
-	// Extract other clauses
-	orderBy := ""
-	orderByPattern := regexp.MustCompile(`(?i)ORDER\s+BY\s+(.*?)(?:\s+(?:LIMIT|GROUP|HAVING|$))`)
-	orderByMatch := orderByPattern.FindStringSubmatch(sql)
-	if len(orderByMatch) > 1 {
-		orderBy = strings.TrimSpace(orderByMatch[1])
-	}
-
-	groupBy := ""
-	groupByPattern := regexp.MustCompile(`(?i)GROUP\s+BY\s+(.*?)(?:\s+(?:ORDER|LIMIT|HAVING|$))`)
-	groupByMatch := groupByPattern.FindStringSubmatch(sql)
-	if len(groupByMatch) > 1 {
-		groupBy = strings.TrimSpace(groupByMatch[1])
-	}
-
-	having := ""
-	havingPattern := regexp.MustCompile(`(?i)HAVING\s+(.*?)(?:\s+(?:ORDER|LIMIT|$))`)
-	havingMatch := havingPattern.FindStringSubmatch(sql)
-	if len(havingMatch) > 1 {
-		having = strings.TrimSpace(havingMatch[1])
-	}
-
-	limit := 0
-	limitPattern := regexp.MustCompile(`(?i)LIMIT\s+(\d+)`)
-	limitMatch := limitPattern.FindStringSubmatch(sql)
-	if len(limitMatch) > 1 {
-		fmt.Sscanf(limitMatch[1], "%d", &limit)
-	}
-
-	return &ParsedQuery{
-		Columns:         columns,
-		DbName:          queryDbName,
-		Measurement:     measurement,
-		TimeRange:       timeRange,
-		WhereConditions: whereClause,
-		OrderBy:         orderBy,
-		GroupBy:         groupBy,
-		Having:          having,
-		Limit:           limit,
-	}, nil
-}
-
-// Extract time range from WHERE clause
+// extractTimeRange parses the WHERE clause to extract time range conditions.
+// Supported formats:
+// - ISO8601 timestamps: time >= '2023-01-01T00:00:00Z'
+// - Cast timestamps: time >= cast('2023-01-01T00:00:00Z' as timestamp)
+// - Epoch nanoseconds: time >= 1748452306626000000
+// - BETWEEN clauses with any of the above formats
 func (q *QueryClient) extractTimeRange(whereClause string) TimeRange {
 	timeRange := TimeRange{
 		Start:         nil,
 		End:           nil,
-		TimeCondition: "",
+		TimeCondition: whereClause, // Preserve original condition
 	}
 
 	if whereClause == "" {
@@ -189,6 +97,7 @@ func (q *QueryClient) extractTimeRange(whereClause string) TimeRange {
 		regexp.MustCompile(`time\s*(<=|<)\s*'([^']+)'`),                    // time <= '2023-01-01T00:00:00Z'
 		regexp.MustCompile(`time\s*=\s*'([^']+)'`),                         // time = '2023-01-01T00:00:00Z'
 		regexp.MustCompile(`time\s+BETWEEN\s+'([^']+)'\s+AND\s+'([^']+)'`), // time BETWEEN '...' AND '...'
+		regexp.MustCompile(`time\s+BETWEEN\s+(\d+)\s+AND\s+(\d+)`),         // time BETWEEN 1748452306626000000 AND 1749057106626000000
 
 		// Cast format
 		regexp.MustCompile(`time\s*(>=|>)\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)`),                                                      // time >= cast('2023-01-01T00:00:00' as timestamp)
@@ -210,48 +119,57 @@ func (q *QueryClient) extractTimeRange(whereClause string) TimeRange {
 	}
 
 	var startTime, endTime time.Time
-	var startOp, endOp string
 	var err error
 
 	for i, pattern := range timePatterns {
 		matches := pattern.FindStringSubmatch(whereClause)
-		// log.Printf("Trying pattern: %s", pattern.String())
 		if len(matches) > 0 {
-			log.Printf("Found matches: %v", matches)
+			log.Printf("Found time pattern match: %s", pattern.String())
 
 			// Handle BETWEEN patterns
-			if i == 3 || i == 7 || i == 11 || i == 15 { // BETWEEN patterns
+			if i == 3 || i == 4 || i == 7 || i == 11 || i == 15 { // BETWEEN patterns
 				startTimestamp := matches[1]
 				endTimestamp := matches[2]
-				// log.Printf("BETWEEN clause: start=%s, end=%s", startTimestamp, endTimestamp)
 
-				startTime, err = time.Parse(time.RFC3339Nano, startTimestamp)
-				if err != nil {
-					startTime, err = time.Parse("2006-01-02T15:04:05", startTimestamp)
+				// Handle nanosecond timestamps
+				if i == 4 { // Nanosecond BETWEEN pattern
+					startNs, err := strconv.ParseInt(startTimestamp, 10, 64)
 					if err != nil {
-						log.Printf("Error parsing start timestamp %s: %v", startTimestamp, err)
+						log.Printf("Error parsing start nanosecond timestamp %s: %v", startTimestamp, err)
 						continue
 					}
-				}
-
-				endTime, err = time.Parse(time.RFC3339Nano, endTimestamp)
-				if err != nil {
-					endTime, err = time.Parse("2006-01-02T15:04:05", endTimestamp)
+					endNs, err := strconv.ParseInt(endTimestamp, 10, 64)
 					if err != nil {
-						log.Printf("Error parsing end timestamp %s: %v", endTimestamp, err)
+						log.Printf("Error parsing end nanosecond timestamp %s: %v", endTimestamp, err)
 						continue
 					}
-				}
+					startTime = time.Unix(0, startNs)
+					endTime = time.Unix(0, endNs)
+				} else {
+					startTime, err = time.Parse(time.RFC3339Nano, startTimestamp)
+					if err != nil {
+						startTime, err = time.Parse("2006-01-02T15:04:05", startTimestamp)
+						if err != nil {
+							log.Printf("Error parsing start timestamp %s: %v", startTimestamp, err)
+							continue
+						}
+					}
 
-				startOp = ">="
-				endOp = "<="
+					endTime, err = time.Parse(time.RFC3339Nano, endTimestamp)
+					if err != nil {
+						endTime, err = time.Parse("2006-01-02T15:04:05", endTimestamp)
+						if err != nil {
+							log.Printf("Error parsing end timestamp %s: %v", endTimestamp, err)
+							continue
+						}
+					}
+				}
 				break
 			}
 
 			// Handle = patterns
 			if i == 2 || i == 6 || i == 10 || i == 14 { // = patterns
 				timestamp := matches[1]
-				// log.Printf("Equal timestamp: %s", timestamp)
 
 				parsedTime, err := time.Parse(time.RFC3339Nano, timestamp)
 				if err != nil {
@@ -264,8 +182,6 @@ func (q *QueryClient) extractTimeRange(whereClause string) TimeRange {
 
 				startTime = parsedTime
 				endTime = parsedTime
-				startOp = ">="
-				endOp = "<="
 				break
 			}
 
@@ -273,7 +189,6 @@ func (q *QueryClient) extractTimeRange(whereClause string) TimeRange {
 			if len(matches) == 3 {
 				timestamp := matches[2]
 				op := matches[1]
-				// log.Printf("Single timestamp comparison: op=%s, timestamp=%s", op, timestamp)
 
 				parsedTime, err := time.Parse(time.RFC3339Nano, timestamp)
 				if err != nil {
@@ -286,10 +201,8 @@ func (q *QueryClient) extractTimeRange(whereClause string) TimeRange {
 
 				if op == ">=" || op == ">" {
 					startTime = parsedTime
-					startOp = op
 				} else if op == "<=" || op == "<" {
 					endTime = parsedTime
-					endOp = op
 				}
 			}
 		}
@@ -298,24 +211,15 @@ func (q *QueryClient) extractTimeRange(whereClause string) TimeRange {
 	if !startTime.IsZero() {
 		startNano := startTime.UnixNano()
 		timeRange.Start = &startNano
-		timeRange.TimeCondition = fmt.Sprintf("time %s epoch_ns('%s'::TIMESTAMP)", startOp, startTime.Format(time.RFC3339))
 	}
 
 	if !endTime.IsZero() {
 		endNano := endTime.UnixNano()
 		timeRange.End = &endNano
-		if timeRange.TimeCondition != "" {
-			timeRange.TimeCondition = fmt.Sprintf("%s AND time %s epoch_ns('%s'::TIMESTAMP)",
-				timeRange.TimeCondition, endOp, endTime.Format(time.RFC3339))
-		} else {
-			timeRange.TimeCondition = fmt.Sprintf("time %s epoch_ns('%s'::TIMESTAMP)",
-				endOp, endTime.Format(time.RFC3339))
-		}
 	}
 
 	if timeRange.Start != nil || timeRange.End != nil {
 		log.Printf("Found time range: start=%v, end=%v", startTime, endTime)
-		log.Printf("Time condition: %s", timeRange.TimeCondition)
 	} else {
 		log.Printf("No time range found")
 	}
@@ -614,6 +518,129 @@ func (q *QueryClient) getHourDirectoriesInRange(datePath string, startDate, endD
 	}
 
 	return hourDirs, nil
+}
+
+// ParseQuery parses a SQL query and extracts its components.
+// It handles various query formats including:
+// - Explicit database names: SELECT * FROM db.table
+// - Default database names: SELECT * FROM table
+// - Complex column selections
+// - Time range conditions in various formats
+// - GROUP BY, ORDER BY, and other clauses
+func (q *QueryClient) ParseQuery(sql, dbName string) (*ParsedQuery, error) {
+	// Normalize whitespace
+	sql = regexp.MustCompile(`\s+`).ReplaceAllString(sql, " ")
+	sql = strings.TrimSpace(sql)
+
+	log.Printf("Parsing query: %s", sql)
+
+	// Extract columns
+	columnsPattern := regexp.MustCompile(`(?i)SELECT\s+(.*?)\s+FROM`)
+	columnsMatch := columnsPattern.FindStringSubmatch(sql)
+	if len(columnsMatch) < 2 {
+		return nil, fmt.Errorf("invalid query: SELECT clause not found or invalid")
+	}
+	columns := strings.TrimSpace(columnsMatch[1])
+
+	// Extract measurement name with optional database
+	fromPattern := regexp.MustCompile(`(?i)FROM\s+(?:(\w+)\.)?(\w+)(?:\s+|$)`)
+	fromMatch := fromPattern.FindStringSubmatch(sql)
+	if len(fromMatch) < 3 {
+		return nil, fmt.Errorf("invalid query: FROM clause not found or invalid")
+	}
+
+	// If db name is in the query, use it, otherwise use the provided dbName
+	queryDbName := dbName
+	if fromMatch[1] != "" {
+		queryDbName = fromMatch[1]
+	}
+	measurement := fromMatch[2]
+
+	// Extract WHERE clause
+	whereClause := ""
+	whereParts := strings.Split(sql, " WHERE ")
+	if len(whereParts) >= 2 {
+		whereClause = whereParts[1]
+
+		// Remove other clauses
+		for _, clause := range []string{" GROUP BY ", " ORDER BY ", " LIMIT ", " HAVING "} {
+			if idx := strings.Index(strings.ToUpper(whereClause), clause); idx != -1 {
+				whereClause = whereClause[:idx]
+			}
+		}
+		whereClause = strings.TrimSpace(whereClause)
+	}
+
+	// Extract time range
+	timeRange := q.extractTimeRange(whereClause)
+	if timeRange.Start != nil || timeRange.End != nil {
+		log.Printf("Detected time range: %v to %v",
+			time.Unix(0, *timeRange.Start).Format(time.RFC3339Nano),
+			time.Unix(0, *timeRange.End).Format(time.RFC3339Nano))
+	} else {
+		log.Printf("No time range detected in WHERE clause")
+	}
+
+	// Extract other clauses
+	orderBy := ""
+	orderByPattern := regexp.MustCompile(`(?i)ORDER\s+BY\s+(.*?)(?:\s+(?:LIMIT|GROUP|HAVING|$))`)
+	orderByMatch := orderByPattern.FindStringSubmatch(sql)
+	if len(orderByMatch) > 1 {
+		orderBy = strings.TrimSpace(orderByMatch[1])
+	}
+
+	groupBy := ""
+	groupByPattern := regexp.MustCompile(`(?i)GROUP\s+BY\s+(.*?)(?:\s+(?:ORDER|LIMIT|HAVING|$))`)
+	groupByMatch := groupByPattern.FindStringSubmatch(sql)
+	if len(groupByMatch) > 1 {
+		groupBy = strings.TrimSpace(groupByMatch[1])
+	}
+
+	having := ""
+	havingPattern := regexp.MustCompile(`(?i)HAVING\s+(.*?)(?:\s+(?:ORDER|LIMIT|$))`)
+	havingMatch := havingPattern.FindStringSubmatch(sql)
+	if len(havingMatch) > 1 {
+		having = strings.TrimSpace(havingMatch[1])
+	}
+
+	limit := 0
+	limitPattern := regexp.MustCompile(`(?i)LIMIT\s+(\d+)`)
+	limitMatch := limitPattern.FindStringSubmatch(sql)
+	if len(limitMatch) > 1 {
+		fmt.Sscanf(limitMatch[1], "%d", &limit)
+	}
+
+	// Create the parsed query
+	parsedQuery := &ParsedQuery{
+		Columns:         columns,
+		DbName:          queryDbName,
+		Measurement:     measurement,
+		TimeRange:       timeRange,
+		WhereConditions: whereClause,
+		OrderBy:         orderBy,
+		GroupBy:         groupBy,
+		Having:          having,
+		Limit:           limit,
+	}
+
+	// If we have a time range, update the time condition
+	if timeRange.Start != nil || timeRange.End != nil {
+		var timeCondition strings.Builder
+		if timeRange.Start != nil {
+			startTime := time.Unix(0, *timeRange.Start)
+			timeCondition.WriteString(fmt.Sprintf("time >= epoch_ns('%s'::TIMESTAMP)", startTime.Format(time.RFC3339)))
+		}
+		if timeRange.End != nil {
+			if timeCondition.Len() > 0 {
+				timeCondition.WriteString(" AND ")
+			}
+			endTime := time.Unix(0, *timeRange.End)
+			timeCondition.WriteString(fmt.Sprintf("time <= epoch_ns('%s'::TIMESTAMP)", endTime.Format(time.RFC3339)))
+		}
+		parsedQuery.TimeRange.TimeCondition = timeCondition.String()
+	}
+
+	return parsedQuery, nil
 }
 
 // Query executes a query against the database
