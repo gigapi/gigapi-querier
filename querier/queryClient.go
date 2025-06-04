@@ -671,6 +671,14 @@ func (c *QueryClient) Query(ctx context.Context, query, dbName string) ([]map[st
 	parsed, err := c.ParseQuery(query, dbName)
 	if err != nil {
 		// Fallback: Directly execute the query in DuckDB if ParseQuery fails
+		// Set DuckDB safety option to disable external access
+		if _, errSet := c.DB.Exec("SET enable_external_access = false;"); errSet != nil {
+		    return nil, fmt.Errorf("failed to disable external access: %v", errSet)
+		}
+		if _, errSet := c.DB.Exec("SET lock_configuration = true;"); errSet != nil {
+		    return nil, fmt.Errorf("failed to lock configuration: %v", errSet)
+		}
+		
 		stmt, err2 := c.DB.Prepare(query)
 		if err2 != nil {
 			return nil, fmt.Errorf("failed to prepare query: %v", err2)
