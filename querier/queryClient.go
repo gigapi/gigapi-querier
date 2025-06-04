@@ -697,7 +697,52 @@ func (c *QueryClient) Query(ctx context.Context, query, dbName string) ([]map[st
 	// Parse the query
 	parsed, err := c.ParseQuery(query, dbName)
 	if err != nil {
-		return nil, err
+		// Fallback: Directly execute the query in DuckDB if ParseQuery fails
+		// Set DuckDB safety option to disable external access
+		if _, errSet := c.DB.Exec("SET enable_external_access = false;"); errSet != nil {
+		    return nil, fmt.Errorf("failed to disable external access: %v", errSet)
+		}
+		if _, errSet := c.DB.Exec("SET lock_configuration = true;"); errSet != nil {
+		    return nil, fmt.Errorf("failed to lock configuration: %v", errSet)
+		}
+		
+		stmt, err2 := c.DB.Prepare(query)
+		if err2 != nil {
+			return nil, fmt.Errorf("failed to prepare query: %v", err2)
+		}
+		defer stmt.Close()
+
+		rows, err2 := stmt.Query()
+		if err2 != nil {
+			return nil, fmt.Errorf("query execution failed: %v", err2)
+		}
+		defer rows.Close()
+
+		columns, err2 := rows.Columns()
+		if err2 != nil {
+			return nil, fmt.Errorf("failed to get columns: %v", err2)
+		}
+
+		var result []map[string]interface{}
+		for rows.Next() {
+			values := make([]interface{}, len(columns))
+			valuePtrs := make([]interface{}, len(columns))
+			for i := range values {
+				valuePtrs[i] = &values[i]
+			}
+			if err := rows.Scan(valuePtrs...); err != nil {
+				return nil, fmt.Errorf("error scanning row: %v", err)
+			}
+			row := make(map[string]interface{})
+			for i, col := range columns {
+				row[col] = values[i]
+			}
+			result = append(result, row)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("error iterating rows: %v", err)
+		}
+		return result, nil
 	}
 
 	// Find relevant files
