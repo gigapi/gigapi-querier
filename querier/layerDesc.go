@@ -52,6 +52,8 @@ func getQuerierLayerDescS3(layer config.LayersConfiguration) (querierLayerDesc, 
 		bucket:   pathParts[0],
 		path:     pathParts[1],
 		secure:   s3Url.Query().Get("secure") != "false",
+		key:      layer.Auth.Key,
+		secret:   layer.Auth.Secret,
 	}
 	if s3Url.User != nil {
 		res.key = s3Url.User.Username()
