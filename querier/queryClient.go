@@ -30,6 +30,8 @@ type QueryClient struct {
 	DataDir          string
 	DB               *sql.DB
 	DefaultTimeRange int64 // 10 minutes in nanoseconds
+
+	layers map[string]querierLayerDesc
 }
 
 // NewQueryClient creates a new QueryClient
@@ -48,6 +50,16 @@ func (q *QueryClient) Initialize() error {
 		return fmt.Errorf("failed to initialize DuckDB: %v", err)
 	}
 	q.DB = db
+	q.layers = map[string]querierLayerDesc{}
+
+	for _, l := range config.Config.Gigapi.Layers {
+		desc, err := getQuerierLayerDesc(l)
+		if err != nil {
+			return fmt.Errorf("failed to initialize layer %s: %v", l.Name, err)
+		}
+		q.layers[l.Name] = desc
+	}
+
 	return nil
 }
 
@@ -422,7 +434,7 @@ func getTableIndex(table *shared.Table) (metadata.TableIndex, error) {
 
 // Find relevant parquet files based on time range
 func (q *QueryClient) FindRelevantFiles(ctx context.Context, dbName, measurement string,
-	timeRange TimeRange) ([]string, error) {
+	timeRange TimeRange) ([]*metadata.IndexEntry, error) {
 	// If no time range specified, get all files
 	var relevantFiles []string
 	// log.Printf("Getting relevant files for %s.%s within time range %v to %v", dbName, measurement,
@@ -451,19 +463,13 @@ func (q *QueryClient) FindRelevantFiles(ctx context.Context, dbName, measurement
 	}
 
 	ies, err := idx.GetQuerier().Query(opts)
-	layersMap := make(map[string]string)
-	for _, l := range config.Config.Gigapi.Layers {
-		layersMap[l.Name] = strings.TrimPrefix(l.URL, "file://")
+	if err != nil {
+		return nil, err
 	}
-	for _, ie := range ies {
-		relevantFiles = append(relevantFiles, filepath.Join(layersMap[ie.Layer], dbName, measurement, "data", ie.Path))
-	}
-
-	if len(relevantFiles) == 0 {
+	if len(ies) == 0 {
 		log.Printf("No files found in any directory for %s.%s", dbName, measurement)
 	}
-
-	return relevantFiles, nil
+	return ies, err
 }
 
 // Find all files for a measurement
@@ -660,6 +666,49 @@ func (c *QueryClient) getDBIndex(ctx context.Context) (metadata.DBIndex, error) 
 	return nil, fmt.Errorf("unsupported metadata type: %s", config.Config.Gigapi.Metadata.Type)
 }
 
+func (c *QueryClient) buildFilesList(db string, table string, files []*metadata.IndexEntry) ([]string, error) {
+	var fileList []string
+	s3Layers := map[string]bool{}
+
+	for _, f := range files {
+		l, ok := c.layers[f.Layer]
+		if !ok {
+			return nil, fmt.Errorf("layer %s not found", f.Layer)
+		}
+		switch l.layer.Type {
+		case "fs":
+			fileList = append(fileList, filepath.Join(l.path, db, table, "data", f.Path))
+		case "s3":
+			_path := l.path
+			if _path != "" {
+				_path += "/"
+			}
+			path := fmt.Sprintf("s3://%s%s/%s/%s", _path, db, table, f.Path)
+			fileList = append(fileList, path)
+			s3Layers[l.layer.Name] = true
+		}
+	}
+	for lName, _ := range s3Layers {
+		sanitizedLName := lName
+		sanitizedLName = regexp.MustCompile("[^a-zA-Z0-9_]").ReplaceAllString(sanitizedLName, "_")
+		secretName := fmt.Sprintf("secret_%s", sanitizedLName)
+		l := c.layers[lName]
+		_, err := c.DB.Exec(fmt.Sprintf(`CREATE OR REPLACE SECRET %s (
+    TYPE s3,
+    USE_SSL %t,
+    KEY_ID %s,
+    SECRET %s,
+	ENDPOINT '%s',
+	SCOPE 's3://%s',
+    URL_STYLE '%s'
+);`, secretName, l.secure, l.key, l.secret, l.hostname, l.bucket, l.urlStyle))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create secret: %v", err)
+		}
+	}
+	return fileList, nil
+}
+
 // Query executes a query against the database
 func (c *QueryClient) Query(ctx context.Context, query, dbName string) ([]map[string]interface{}, error) {
 	// Ensure we have a context
@@ -766,9 +815,13 @@ func (c *QueryClient) Query(ctx context.Context, query, dbName string) ([]map[st
 	}
 
 	// Find relevant files
-	files, err := c.FindRelevantFiles(ctx, parsed.DbName, parsed.Measurement, parsed.TimeRange)
-	if err != nil || len(files) == 0 {
-		return nil, fmt.Errorf("no relevant files found for query")
+	entries, err := c.FindRelevantFiles(ctx, parsed.DbName, parsed.Measurement, parsed.TimeRange)
+	if err != nil {
+		return nil, err
+	}
+	files, err := c.buildFilesList(parsed.DbName, parsed.Measurement, entries)
+	if err != nil {
+		return nil, err
 	}
 
 	start := time.Now()
