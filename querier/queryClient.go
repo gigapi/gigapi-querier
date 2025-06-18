@@ -18,8 +18,8 @@ import (
 
 	"github.com/gigapi/gigapi-querier/core"
 	_ "github.com/marcboeker/go-duckdb/v2"
-	"github.com/apache/arrow/go/v14/arrow/array"
-	"github.com/apache/arrow/go/v14/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow"
 )
 
 var db *sql.DB

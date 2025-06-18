@@ -4,10 +4,12 @@ go 1.24.2
 
 require (
 	github.com/apache/arrow-go/v18 v18.3.0
+	github.com/apache/arrow/go/v18 v18.0.0-20240829005432-58415d1fac50
 	github.com/gigapi/gigapi-config v0.0.9
 	github.com/gigapi/gigapi/v2 v2.0.13
 	github.com/gigapi/metadata v0.0.4
 	github.com/marcboeker/go-duckdb/v2 v2.2.0
+	github.com/mark3labs/mcp-go v0.32.0
 	github.com/spf13/afero v1.12.0
 	github.com/stretchr/testify v1.10.0
 	go.uber.org/zap v1.27.0
@@ -16,7 +18,6 @@ require (
 )
 
 require (
-	github.com/apache/arrow/go/v18 v18.0.0-20240829005432-58415d1fac50 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
@@ -34,14 +35,10 @@ require (
 	github.com/google/flatbuffers v25.2.10+incompatible // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/jackc/pgx/v5 v5.4.3 // indirect
-	github.com/jeroenrinzema/psql-wire v0.12.2 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
 	github.com/klauspost/compress v1.18.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
-	github.com/lib/pq v1.10.9 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
-	github.com/marcboeker/go-duckdb v1.8.5 // indirect
 	github.com/marcboeker/go-duckdb/arrowmapping v0.0.7 // indirect
 	github.com/marcboeker/go-duckdb/mapping v0.0.7 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
@@ -55,10 +52,11 @@ require (
 	github.com/sagikazarmark/slog-shim v0.1.0 // indirect
 	github.com/segmentio/asm v1.2.0 // indirect
 	github.com/sourcegraph/conc v0.3.0 // indirect
-	github.com/spf13/cast v1.6.0 // indirect
+	github.com/spf13/cast v1.7.1 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
 	github.com/spf13/viper v1.18.1 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
+	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	github.com/zeebo/xxh3 v1.0.2 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/exp v0.0.0-20250128182459-e0ece0dbea4c // indirect
