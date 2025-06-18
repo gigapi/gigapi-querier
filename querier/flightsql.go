@@ -7,11 +7,7 @@ import (
 	"net"
 	"regexp"
 	"strings"
-	"sync"
-	"time"
-
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
+	"encoding/base64"
 	"github.com/apache/arrow-go/v18/arrow/flight"
 	"github.com/apache/arrow-go/v18/arrow/flight/flightsql"
 	flightgen "github.com/apache/arrow-go/v18/arrow/flight/gen/flight"
