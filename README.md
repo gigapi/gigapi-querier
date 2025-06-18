@@ -11,21 +11,26 @@ GigAPI Go provides a Flight SQL and HTTP interface to query time-series using Gi
 ## <img src="https://github.com/user-attachments/assets/a9aa3ebd-9164-476d-aedf-97b817078350" width=24 /> Quick Start
 
 ### Docker
-Run `gigapi-querier` using Docker making sure the proper `data` folder or `S3` bucket is provided
+Run `gigapi` _all-in-one_ using Docker making sure the proper `data` with local storage
 ```yaml
-gigapi-querier:
-  image: ghcr.io/gigapi/gigapi-querier:latest
-  container_name: gigapi-querier
-  hostname: gigapi-querier
-  volumes:
-    - ./data:/data
-  ports:
-    - "8080:8080"
-    - "8082:8082"
-  environment:
-    - DATA_DIR=/data
-    - PORT=8080
+services:
+  gigapi:
+    image: ghcr.io/gigapi/gigapi:latest
+    container_name: gigapi
+    hostname: gigapi
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+    ports:
+      - "7971:7971"
+    environment:
+      - GIGAPI_ROOT=/data
+      - GIGAPI_LAYERS_0_NAME=default
+      - GIGAPI_LAYERS_0_TYPE=fs
+      - GIGAPI_LAYERS_0_URL=file:///data
+
 ```
+Gigapi-querier is part of [gigapi](https://github.com/gigapi/gigapi)
 
 ### Build
 ```bash
