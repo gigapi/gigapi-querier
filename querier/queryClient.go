@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/gigapi/gigapi-config/config"
+	"github.com/gigapi/gigapi/v2/merge/shared"
 	"github.com/gigapi/metadata"
 	"log"
 	"os"
@@ -31,6 +32,8 @@ type QueryClient struct {
 	DataDir          string
 	DB               *sql.DB
 	DefaultTimeRange int64 // 10 minutes in nanoseconds
+
+	layers map[string]querierLayerDesc
 }
 
 // NewQueryClient creates a new QueryClient
@@ -49,6 +52,16 @@ func (q *QueryClient) Initialize() error {
 		return fmt.Errorf("failed to initialize DuckDB: %v", err)
 	}
 	q.DB = db
+	q.layers = map[string]querierLayerDesc{}
+
+	for _, l := range config.Config.Gigapi.Layers {
+		desc, err := getQuerierLayerDesc(l)
+		if err != nil {
+			return fmt.Errorf("failed to initialize layer %s: %v", l.Name, err)
+		}
+		q.layers[l.Name] = desc
+	}
+
 	return nil
 }
 
@@ -394,19 +407,36 @@ func (q *QueryClient) enumFolderNoMetadata(path string) ([]string, error) {
 	return res, nil
 }
 
-func getIndex(db, measurement string) (metadata.TableIndex, error) {
+func getTableIndex(table *shared.Table) (metadata.TableIndex, error) {
+	layers := make([]metadata.Layer, len(config.Config.Gigapi.Layers))
+	for i, l := range config.Config.Gigapi.Layers {
+		layers[i] = metadata.Layer{
+			URL:    l.URL,
+			Name:   l.Name,
+			Type:   l.Type,
+			TTLSec: int32(l.TTL.Seconds()),
+		}
+	}
 	switch config.Config.Gigapi.Metadata.Type {
 	case "json":
-		return metadata.NewJSONIndex(config.Config.Gigapi.Root, db, measurement), nil
+		return metadata.NewJSONIndex(
+			config.Config.Gigapi.Root,
+			table.Database,
+			table.Name,
+			layers)
 	case "redis":
-		return metadata.NewRedisIndex(config.Config.Gigapi.Metadata.URL, db, measurement)
+		return metadata.NewRedisIndex(
+			config.Config.Gigapi.Metadata.URL,
+			table.Database,
+			table.Name,
+			layers)
 	}
-	return nil, fmt.Errorf("Unsupported index %s", config.Config.Gigapi.Metadata.Type)
+	return nil, fmt.Errorf("unknown metadata type: %q", config.Config.Gigapi.Metadata.Type)
 }
 
 // Find relevant parquet files based on time range
 func (q *QueryClient) FindRelevantFiles(ctx context.Context, dbName, measurement string,
-	timeRange TimeRange) ([]string, error) {
+	timeRange TimeRange) ([]*metadata.IndexEntry, error) {
 	// If no time range specified, get all files
 	var relevantFiles []string
 	// log.Printf("Getting relevant files for %s.%s within time range %v to %v", dbName, measurement,
@@ -426,21 +456,22 @@ func (q *QueryClient) FindRelevantFiles(ctx context.Context, dbName, measurement
 		opts.Before = time.Unix(0, *timeRange.End)
 	}
 
-	idx, err := getIndex(dbName, measurement)
+	idx, err := getTableIndex(&shared.Table{
+		Database: dbName,
+		Name:     measurement,
+	})
 	if err != nil {
 		return nil, err
 	}
 
 	ies, err := idx.GetQuerier().Query(opts)
-	for _, ie := range ies {
-		relevantFiles = append(relevantFiles, filepath.Join(config.Config.Gigapi.Root, dbName, measurement, "data", ie.Path))
+	if err != nil {
+		return nil, err
 	}
-
-	if len(relevantFiles) == 0 {
+	if len(ies) == 0 {
 		log.Printf("No files found in any directory for %s.%s", dbName, measurement)
 	}
-
-	return relevantFiles, nil
+	return ies, err
 }
 
 // Find all files for a measurement
@@ -618,6 +649,68 @@ func (q *QueryClient) getHourDirectoriesInRange(datePath string, startDate, endD
 	return hourDirs, nil
 }
 
+func (c *QueryClient) getDBIndex(ctx context.Context) (metadata.DBIndex, error) {
+	var layers []metadata.Layer
+	for _, l := range config.Config.Gigapi.Layers {
+		layers = append(layers, metadata.Layer{
+			URL:    l.URL,
+			Name:   l.Name,
+			Type:   l.Type,
+			TTLSec: int32(l.TTL.Seconds()),
+		})
+	}
+	switch config.Config.Gigapi.Metadata.Type {
+	case "json":
+		return metadata.NewJSONDBIndex(layers), nil
+	case "redis":
+		return metadata.NewRedisDbIndex(config.Config.Gigapi.Metadata.URL)
+	}
+	return nil, fmt.Errorf("unsupported metadata type: %s", config.Config.Gigapi.Metadata.Type)
+}
+
+func (c *QueryClient) buildFilesList(db string, table string, files []*metadata.IndexEntry) ([]string, error) {
+	var fileList []string
+	s3Layers := map[string]bool{}
+
+	for _, f := range files {
+		l, ok := c.layers[f.Layer]
+		if !ok {
+			return nil, fmt.Errorf("layer %s not found", f.Layer)
+		}
+		switch l.layer.Type {
+		case "fs":
+			fileList = append(fileList, filepath.Join(l.path, db, table, "data", f.Path))
+		case "s3":
+			_path := l.path
+			if _path != "" {
+				_path += "/"
+			}
+			path := fmt.Sprintf("s3://%s%s/%s/%s", _path, db, table, f.Path)
+			fileList = append(fileList, path)
+			s3Layers[l.layer.Name] = true
+		}
+	}
+	for lName, _ := range s3Layers {
+		sanitizedLName := lName
+		sanitizedLName = regexp.MustCompile("[^a-zA-Z0-9_]").ReplaceAllString(sanitizedLName, "_")
+		secretName := fmt.Sprintf("secret_%s", sanitizedLName)
+		l := c.layers[lName]
+		_, err := c.DB.Exec(fmt.Sprintf(`CREATE OR REPLACE SECRET %s (
+    TYPE s3,
+    USE_SSL %t,
+    KEY_ID %s,
+    SECRET %s,
+	ENDPOINT '%s',
+	SCOPE 's3://%s',
+    URL_STYLE '%s'
+);`, secretName, l.secure, l.key, l.secret, l.hostname, l.bucket, l.urlStyle))
+		if err != nil {
+			return nil, fmt.Errorf("failed to create secret: %v", err)
+		}
+	}
+	return fileList, nil
+}
+
 // Query executes a query against the database
 func (c *QueryClient) Query(ctx context.Context, query, dbName string) ([]map[string]interface{}, error) {
 	// Ensure we have a context
@@ -635,36 +728,39 @@ func (c *QueryClient) Query(ctx context.Context, query, dbName string) ([]map[st
 	// Handle special commands
 	switch upperQuery {
 	case "SHOW DATABASES":
-		entries, err := os.ReadDir(c.DataDir)
+		idx, err := c.getDBIndex(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get DB index: %v", err)
+		}
+		entries, err := idx.Databases()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read data directory: %v", err)
 		}
 
 		results := make([]map[string]interface{}, 0)
 		for _, entry := range entries {
-			if entry.IsDir() {
-				results = append(results, map[string]interface{}{
-					"database_name": entry.Name(),
-				})
-			}
+			results = append(results, map[string]interface{}{
+				"database_name": entry,
+			})
 		}
 		return results, nil
 
 	case "SHOW TABLES":
 		// List directories inside the database folder
-		dbPath := filepath.Join(c.DataDir, dbName)
-		entries, err := os.ReadDir(dbPath)
+		idx, err := c.getDBIndex(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get DB index: %v", err)
+		}
+		entries, err := idx.Tables(dbName)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read database directory: %v", err)
 		}
 
 		results := make([]map[string]interface{}, 0)
 		for _, entry := range entries {
-			if entry.IsDir() {
-				results = append(results, map[string]interface{}{
-					"table_name": entry.Name(),
-				})
-			}
+			results = append(results, map[string]interface{}{
+				"table_name": entry,
+			})
 		}
 		return results, nil
 	}
@@ -672,13 +768,62 @@ func (c *QueryClient) Query(ctx context.Context, query, dbName string) ([]map[st
 	// Parse the query
 	parsed, err := c.ParseQuery(query, dbName)
 	if err != nil {
-		return nil, err
+		// Fallback: Directly execute the query in DuckDB if ParseQuery fails
+		// Set DuckDB safety option to disable external access
+		/*if _, errSet := c.DB.Exec("SET enable_external_access = false;"); errSet != nil {
+			return nil, fmt.Errorf("failed to disable external access: %v", errSet)
+		}
+		if _, errSet := c.DB.Exec("SET lock_configuration = true;"); errSet != nil {
+			return nil, fmt.Errorf("failed to lock configuration: %v", errSet)
+		}*/
+
+		stmt, err2 := c.DB.Prepare(query)
+		if err2 != nil {
+			return nil, fmt.Errorf("failed to prepare query: %v", err2)
+		}
+		defer stmt.Close()
+
+		rows, err2 := stmt.Query()
+		if err2 != nil {
+			return nil, fmt.Errorf("query execution failed: %v", err2)
+		}
+		defer rows.Close()
+
+		columns, err2 := rows.Columns()
+		if err2 != nil {
+			return nil, fmt.Errorf("failed to get columns: %v", err2)
+		}
+
+		var result []map[string]interface{}
+		for rows.Next() {
+			values := make([]interface{}, len(columns))
+			valuePtrs := make([]interface{}, len(columns))
+			for i := range values {
+				valuePtrs[i] = &values[i]
+			}
+			if err := rows.Scan(valuePtrs...); err != nil {
+				return nil, fmt.Errorf("error scanning row: %v", err)
+			}
+			row := make(map[string]interface{})
+			for i, col := range columns {
+				row[col] = values[i]
+			}
+			result = append(result, row)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("error iterating rows: %v", err)
+		}
+		return result, nil
 	}
 
 	// Find relevant files
-	files, err := c.FindRelevantFiles(ctx, parsed.DbName, parsed.Measurement, parsed.TimeRange)
-	if err != nil || len(files) == 0 {
-		return nil, fmt.Errorf("no relevant files found for query")
+	entries, err := c.FindRelevantFiles(ctx, parsed.DbName, parsed.Measurement, parsed.TimeRange)
+	if err != nil {
+		return nil, err
+	}
+	files, err := c.buildFilesList(parsed.DbName, parsed.Measurement, entries)
+	if err != nil {
+		return nil, err
 	}
 
 	start := time.Now()

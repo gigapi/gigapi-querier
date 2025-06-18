@@ -6,7 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apache/arrow/go/v14/arrow/flight/flightsql"
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/array"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
