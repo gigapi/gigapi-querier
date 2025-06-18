@@ -18,6 +18,8 @@ import (
 
 	"github.com/gigapi/gigapi-querier/core"
 	_ "github.com/marcboeker/go-duckdb/v2"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow"
 )
 
 var db *sql.DB
@@ -926,6 +928,12 @@ func (c *QueryClient) Query(ctx context.Context, query, dbName string) ([]map[st
 	}
 
 	return result, nil
+}
+
+// QueryArrow executes a query against DuckDB and returns an Arrow RecordReader and schema
+func (c *QueryClient) QueryArrow(ctx context.Context, query string) (array.RecordReader, *arrow.Schema, error) {
+	// TODO: Implement Arrow streaming for the current DuckDB Go driver version
+	return nil, nil, fmt.Errorf("Arrow streaming not implemented for this DuckDB Go driver version")
 }
 
 // Close releases resources
