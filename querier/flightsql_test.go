@@ -15,7 +15,8 @@ import (
 
 func startTestFlightSQLServer(qc *QueryClient, port int) (*grpc.Server, error) {
 	s := grpc.NewServer()
-	_ = NewFlightSQLServer(qc)
+	server := NewFlightSQLServer(qc)
+	flightsql.RegisterFlightServiceServer(s, server)
 	ln, err := net.Listen("tcp", ":"+fmt.Sprint(port))
 	if err != nil {
 		return nil, err
