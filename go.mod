@@ -4,7 +4,6 @@ go 1.24.2
 
 require (
 	github.com/apache/arrow-go/v18 v18.3.0
-	github.com/apache/arrow/go/v18 v18.0.0-20240829005432-58415d1fac50
 	github.com/gigapi/gigapi-config v0.0.9
 	github.com/gigapi/gigapi/v2 v2.0.13
 	github.com/gigapi/metadata v0.0.4
