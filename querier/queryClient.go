@@ -13,11 +13,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gigapi/gigapi-querier/core"
 	_ "github.com/marcboeker/go-duckdb/v2"
+	"github.com/apache/arrow-go/v18/arrow/array"
+	"github.com/apache/arrow-go/v18/arrow"
 )
 
 var db *sql.DB
@@ -115,14 +118,19 @@ func (q *QueryClient) ParseQuery(sql, dbName string) (*ParsedQuery, error) {
 
 	// Extract WHERE clause
 	whereClause := ""
-	whereParts := strings.Split(sql, " WHERE ")
+	whereParts := strings.Split(strings.ToUpper(sql), " WHERE ")
 	if len(whereParts) >= 2 {
-		whereClause = whereParts[1]
+		// Convert back to original case for the WHERE clause part
+		originalSql := sql
+		whereStart := strings.Index(strings.ToUpper(originalSql), " WHERE ")
+		if whereStart != -1 {
+			whereClause = originalSql[whereStart+6:] // Skip " WHERE "
 
-		// Remove other clauses
-		for _, clause := range []string{" GROUP BY ", " ORDER BY ", " LIMIT ", " HAVING "} {
-			if idx := strings.Index(strings.ToUpper(whereClause), clause); idx != -1 {
-				whereClause = whereClause[:idx]
+			// Remove other clauses
+			for _, clause := range []string{" GROUP BY ", " ORDER BY ", " LIMIT ", " HAVING "} {
+				if idx := strings.Index(strings.ToUpper(whereClause), clause); idx != -1 {
+					whereClause = whereClause[:idx]
+				}
 			}
 		}
 	}
@@ -132,9 +140,15 @@ func (q *QueryClient) ParseQuery(sql, dbName string) (*ParsedQuery, error) {
 	// Extract time range
 	timeRange := q.extractTimeRange(whereClause)
 	if timeRange.Start != nil || timeRange.End != nil {
-		log.Printf("Detected time range: %v to %v",
-			time.Unix(0, *timeRange.Start).Format(time.RFC3339Nano),
-			time.Unix(0, *timeRange.End).Format(time.RFC3339Nano))
+		startStr := "nil"
+		endStr := "nil"
+		if timeRange.Start != nil {
+			startStr = time.Unix(0, *timeRange.Start).Format(time.RFC3339Nano)
+		}
+		if timeRange.End != nil {
+			endStr = time.Unix(0, *timeRange.End).Format(time.RFC3339Nano)
+		}
+		log.Printf("Detected time range: %v to %v", startStr, endStr)
 	} else {
 		log.Printf("No time range detected in WHERE clause")
 	}
@@ -181,6 +195,34 @@ func (q *QueryClient) ParseQuery(sql, dbName string) (*ParsedQuery, error) {
 	}, nil
 }
 
+// detectTimeColumn finds the time column name in a WHERE clause
+func (q *QueryClient) detectTimeColumn(whereClause string) string {
+	// Common time column names to look for
+	timeColumnPatterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?i)(\w+)\s*(>=|<=|=|>|<)\s*'([^']+)'`),                    // any column with timestamp comparison
+		regexp.MustCompile(`(?i)(\w+)\s*(>=|<=|=|>|<)\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)`), // any column with cast timestamp
+		regexp.MustCompile(`(?i)(\w+)\s*(>=|<=|=|>|<)\s*epoch_ns\s*\(\s*'([^']+)'`),     // any column with epoch_ns
+		regexp.MustCompile(`(?i)(\w+)\s+BETWEEN\s+'([^']+)'\s+AND\s+'([^']+)'`),        // any column with BETWEEN
+		regexp.MustCompile(`(?i)(\w+)\s*(>=|<=|=|>|<)\s*(\d+)`),                        // any column with numeric comparison
+		regexp.MustCompile(`(?i)(\w+)\s+BETWEEN\s+(\d+)\s+AND\s+(\d+)`),                // any column with numeric BETWEEN
+	}
+
+	for _, pattern := range timeColumnPatterns {
+		matches := pattern.FindStringSubmatch(whereClause)
+		if len(matches) > 1 {
+			columnName := matches[1]
+			// Check if this looks like a time column
+			if strings.Contains(strings.ToLower(columnName), "time") || 
+			   strings.Contains(strings.ToLower(columnName), "timestamp") ||
+			   strings.Contains(strings.ToLower(columnName), "date") ||
+			   columnName == "__timestamp" {
+				return columnName
+			}
+		}
+	}
+	return "time" // fallback to default
+}
+
 // Extract time range from WHERE clause
 func (q *QueryClient) extractTimeRange(whereClause string) TimeRange {
 	timeRange := TimeRange{
@@ -193,33 +235,41 @@ func (q *QueryClient) extractTimeRange(whereClause string) TimeRange {
 		return timeRange
 	}
 
-	// log.Printf("Extracting time range from WHERE clause: %s", whereClause)
+	// Detect the time column name
+	timeColumn := q.detectTimeColumn(whereClause)
+	log.Printf("Detected time column: %s", timeColumn)
 
-	// Match time patterns including both simple timestamps and epoch_ns with various formats
+	// Create dynamic patterns based on the detected time column
 	timePatterns := []*regexp.Regexp{
 		// Simple timestamp format
-		regexp.MustCompile(`time\s*(>=|>)\s*'([^']+)'`),                    // time >= '2023-01-01T00:00:00Z'
-		regexp.MustCompile(`time\s*(<=|<)\s*'([^']+)'`),                    // time <= '2023-01-01T00:00:00Z'
-		regexp.MustCompile(`time\s*=\s*'([^']+)'`),                         // time = '2023-01-01T00:00:00Z'
-		regexp.MustCompile(`time\s+BETWEEN\s+'([^']+)'\s+AND\s+'([^']+)'`), // time BETWEEN '...' AND '...'
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s*(>=|>)\s*'([^']+)'`, regexp.QuoteMeta(timeColumn))),                    // column >= '2023-01-01T00:00:00Z'
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s*(<=|<)\s*'([^']+)'`, regexp.QuoteMeta(timeColumn))),                    // column <= '2023-01-01T00:00:00Z'
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s*=\s*'([^']+)'`, regexp.QuoteMeta(timeColumn))),                         // column = '2023-01-01T00:00:00Z'
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s+BETWEEN\s+'([^']+)'\s+AND\s+'([^']+)'`, regexp.QuoteMeta(timeColumn))), // column BETWEEN '...' AND '...'
 
 		// Cast format
-		regexp.MustCompile(`time\s*(>=|>)\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)`),                                                      // time >= cast('2023-01-01T00:00:00' as timestamp)
-		regexp.MustCompile(`time\s*(<=|<)\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)`),                                                      // time <= cast('2023-01-01T00:00:00' as timestamp)
-		regexp.MustCompile(`time\s*=\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)`),                                                           // time = cast('2023-01-01T00:00:00' as timestamp)
-		regexp.MustCompile(`time\s+BETWEEN\s+cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)\s+AND\s+cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)`), // time BETWEEN cast('...') AND cast('...')
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s*(>=|>)\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)`, regexp.QuoteMeta(timeColumn))),                                                      // column >= cast('2023-01-01T00:00:00' as timestamp)
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s*(<=|<)\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)`, regexp.QuoteMeta(timeColumn))),                                                      // column <= cast('2023-01-01T00:00:00' as timestamp)
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s*=\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)`, regexp.QuoteMeta(timeColumn))),                                                           // column = cast('2023-01-01T00:00:00' as timestamp)
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s+BETWEEN\s+cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)\s+AND\s+cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)`, regexp.QuoteMeta(timeColumn))), // column BETWEEN cast('...') AND cast('...')
 
 		// Epoch_ns format
-		regexp.MustCompile(`time\s*(>=|>)\s*epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)`),                                                         // time >= epoch_ns('2023-01-01T00:00:00'::TIMESTAMP)
-		regexp.MustCompile(`time\s*(<=|<)\s*epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)`),                                                         // time <= epoch_ns('2023-01-01T00:00:00'::TIMESTAMP)
-		regexp.MustCompile(`time\s*=\s*epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)`),                                                              // time = epoch_ns('2023-01-01T00:00:00'::TIMESTAMP)
-		regexp.MustCompile(`time\s+BETWEEN\s+epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)\s+AND\s+epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)`), // time BETWEEN epoch_ns('...') AND epoch_ns('...')
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s*(>=|>)\s*epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)`, regexp.QuoteMeta(timeColumn))),                                                         // column >= epoch_ns('2023-01-01T00:00:00'::TIMESTAMP)
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s*(<=|<)\s*epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)`, regexp.QuoteMeta(timeColumn))),                                                         // column <= epoch_ns('2023-01-01T00:00:00'::TIMESTAMP)
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s*=\s*epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)`, regexp.QuoteMeta(timeColumn))),                                                              // column = epoch_ns('2023-01-01T00:00:00'::TIMESTAMP)
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s+BETWEEN\s+epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)\s+AND\s+epoch_ns\s*\(\s*'([^']+)'(?:::TIMESTAMP)?\s*\)`, regexp.QuoteMeta(timeColumn))), // column BETWEEN epoch_ns('...') AND epoch_ns('...')
 
 		// Epoch_ns with cast format
-		regexp.MustCompile(`time\s*(>=|>)\s*epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)`),                                                                                           // time >= epoch_ns(cast('2023-01-01T00:00:00' as timestamp)::TIMESTAMP)
-		regexp.MustCompile(`time\s*(<=|<)\s*epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)`),                                                                                           // time <= epoch_ns(cast('2023-01-01T00:00:00' as timestamp)::TIMESTAMP)
-		regexp.MustCompile(`time\s*=\s*epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)`),                                                                                                // time = epoch_ns(cast('2023-01-01T00:00:00' as timestamp)::TIMESTAMP)
-		regexp.MustCompile(`time\s+BETWEEN\s+epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)\s+AND\s+epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)`), // time BETWEEN epoch_ns(cast('...')::TIMESTAMP) AND epoch_ns(cast('...')::TIMESTAMP)
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s*(>=|>)\s*epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)`, regexp.QuoteMeta(timeColumn))),                                                                                           // column >= epoch_ns(cast('2023-01-01T00:00:00' as timestamp)::TIMESTAMP)
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s*(<=|<)\s*epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)`, regexp.QuoteMeta(timeColumn))),                                                                                           // column <= epoch_ns(cast('2023-01-01T00:00:00' as timestamp)::TIMESTAMP)
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s*=\s*epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)`, regexp.QuoteMeta(timeColumn))),                                                                                                // column = epoch_ns(cast('2023-01-01T00:00:00' as timestamp)::TIMESTAMP)
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s+BETWEEN\s+epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)\s+AND\s+epoch_ns\s*\(\s*cast\s*\(\s*'([^']+)'\s+as\s+timestamp\s*\)(?:::TIMESTAMP)?\s*\)`, regexp.QuoteMeta(timeColumn))), // column BETWEEN epoch_ns(cast('...')::TIMESTAMP) AND epoch_ns(cast('...')::TIMESTAMP)
+
+		// Also handle numeric timestamp comparisons (like __timestamp >= 1747803600000000000)
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s*(>=|>)\s*(\d+)`, regexp.QuoteMeta(timeColumn))),                    // column >= 1747803600000000000
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s*(<=|<)\s*(\d+)`, regexp.QuoteMeta(timeColumn))),                    // column <= 1747825200000000000
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s*=\s*(\d+)`, regexp.QuoteMeta(timeColumn))),                         // column = 1747803600000000000
+		regexp.MustCompile(fmt.Sprintf(`(?i)%s\s+BETWEEN\s+(\d+)\s+AND\s+(\d+)`, regexp.QuoteMeta(timeColumn))),     // column BETWEEN 1747803600000000000 AND 1747825200000000000
 	}
 
 	var startTime, endTime time.Time
@@ -228,15 +278,13 @@ func (q *QueryClient) extractTimeRange(whereClause string) TimeRange {
 
 	for i, pattern := range timePatterns {
 		matches := pattern.FindStringSubmatch(whereClause)
-		// log.Printf("Trying pattern: %s", pattern.String())
 		if len(matches) > 0 {
 			log.Printf("Found matches: %v", matches)
 
-			// Handle BETWEEN patterns
-			if i == 3 || i == 7 || i == 11 || i == 15 { // BETWEEN patterns
+			// Handle BETWEEN patterns (string timestamps)
+			if i == 3 || i == 7 || i == 11 || i == 15 { // BETWEEN patterns with string timestamps
 				startTimestamp := matches[1]
 				endTimestamp := matches[2]
-				// log.Printf("BETWEEN clause: start=%s, end=%s", startTimestamp, endTimestamp)
 
 				startTime, err = time.Parse(time.RFC3339Nano, startTimestamp)
 				if err != nil {
@@ -261,10 +309,33 @@ func (q *QueryClient) extractTimeRange(whereClause string) TimeRange {
 				break
 			}
 
-			// Handle = patterns
-			if i == 2 || i == 6 || i == 10 || i == 14 { // = patterns
+			// Handle BETWEEN patterns (numeric timestamps)
+			if i == 19 { // BETWEEN patterns with numeric timestamps
+				startTimestamp := matches[1]
+				endTimestamp := matches[2]
+
+				startNano, err := strconv.ParseInt(startTimestamp, 10, 64)
+				if err != nil {
+					log.Printf("Error parsing start timestamp %s: %v", startTimestamp, err)
+					continue
+				}
+				startTime = time.Unix(0, startNano)
+
+				endNano, err := strconv.ParseInt(endTimestamp, 10, 64)
+				if err != nil {
+					log.Printf("Error parsing end timestamp %s: %v", endTimestamp, err)
+					continue
+				}
+				endTime = time.Unix(0, endNano)
+
+				startOp = ">="
+				endOp = "<="
+				break
+			}
+
+			// Handle = patterns (string timestamps)
+			if i == 2 || i == 6 || i == 10 || i == 14 { // = patterns with string timestamps
 				timestamp := matches[1]
-				// log.Printf("Equal timestamp: %s", timestamp)
 
 				parsedTime, err := time.Parse(time.RFC3339Nano, timestamp)
 				if err != nil {
@@ -282,11 +353,28 @@ func (q *QueryClient) extractTimeRange(whereClause string) TimeRange {
 				break
 			}
 
-			// Handle >= and <= patterns
-			if len(matches) == 3 {
+			// Handle = patterns (numeric timestamps)
+			if i == 18 { // = patterns with numeric timestamps
+				timestamp := matches[1]
+
+				nano, err := strconv.ParseInt(timestamp, 10, 64)
+				if err != nil {
+					log.Printf("Error parsing timestamp %s: %v", timestamp, err)
+					continue
+				}
+				parsedTime := time.Unix(0, nano)
+
+				startTime = parsedTime
+				endTime = parsedTime
+				startOp = ">="
+				endOp = "<="
+				break
+			}
+
+			// Handle >= and <= patterns (string timestamps)
+			if len(matches) == 3 && (i == 0 || i == 1 || i == 4 || i == 5 || i == 8 || i == 9 || i == 12 || i == 13) {
 				timestamp := matches[2]
 				op := matches[1]
-				// log.Printf("Single timestamp comparison: op=%s, timestamp=%s", op, timestamp)
 
 				parsedTime, err := time.Parse(time.RFC3339Nano, timestamp)
 				if err != nil {
@@ -305,24 +393,45 @@ func (q *QueryClient) extractTimeRange(whereClause string) TimeRange {
 					endOp = op
 				}
 			}
+
+			// Handle >= and <= patterns (numeric timestamps)
+			if len(matches) == 3 && (i == 16 || i == 17) {
+				timestamp := matches[2]
+				op := matches[1]
+
+				nano, err := strconv.ParseInt(timestamp, 10, 64)
+				if err != nil {
+					log.Printf("Error parsing timestamp %s: %v", timestamp, err)
+					continue
+				}
+				parsedTime := time.Unix(0, nano)
+
+				if op == ">=" || op == ">" {
+					startTime = parsedTime
+					startOp = op
+				} else if op == "<=" || op == "<" {
+					endTime = parsedTime
+					endOp = op
+				}
+			}
 		}
 	}
 
 	if !startTime.IsZero() {
 		startNano := startTime.UnixNano()
 		timeRange.Start = &startNano
-		timeRange.TimeCondition = fmt.Sprintf("time %s epoch_ns('%s'::TIMESTAMP)", startOp, startTime.Format(time.RFC3339))
+		timeRange.TimeCondition = fmt.Sprintf("%s %s epoch_ns('%s'::TIMESTAMP)", timeColumn, startOp, startTime.Format(time.RFC3339))
 	}
 
 	if !endTime.IsZero() {
 		endNano := endTime.UnixNano()
 		timeRange.End = &endNano
 		if timeRange.TimeCondition != "" {
-			timeRange.TimeCondition = fmt.Sprintf("%s AND time %s epoch_ns('%s'::TIMESTAMP)",
-				timeRange.TimeCondition, endOp, endTime.Format(time.RFC3339))
+			timeRange.TimeCondition = fmt.Sprintf("%s AND %s %s epoch_ns('%s'::TIMESTAMP)",
+				timeRange.TimeCondition, timeColumn, endOp, endTime.Format(time.RFC3339))
 		} else {
-			timeRange.TimeCondition = fmt.Sprintf("time %s epoch_ns('%s'::TIMESTAMP)",
-				endOp, endTime.Format(time.RFC3339))
+			timeRange.TimeCondition = fmt.Sprintf("%s %s epoch_ns('%s'::TIMESTAMP)",
+				timeColumn, endOp, endTime.Format(time.RFC3339))
 		}
 	}
 
@@ -836,7 +945,12 @@ func (c *QueryClient) Query(ctx context.Context, query, dbName string) ([]map[st
 	}
 
 	// Split the original query and rebuild with file list
-	originalParts := strings.SplitN(query, " FROM ", 2)
+	// Use case-insensitive split for FROM clause
+	fromIndex := strings.Index(upperQuery, " FROM ")
+	if fromIndex == -1 {
+		return nil, fmt.Errorf("invalid query: FROM clause not found")
+	}
+	originalParts := []string{query[:fromIndex], query[fromIndex+6:]} // 6 is length of " FROM "
 	var duckdbQuery string
 
 	if len(originalParts) >= 2 {
@@ -846,7 +960,7 @@ func (c *QueryClient) Query(ctx context.Context, query, dbName string) ([]map[st
 		restOfQuery := tableRegex.ReplaceAllString(originalParts[1], "")
 
 		// Replace any simple timestamp comparisons with epoch_ns
-		timestampRegex := regexp.MustCompile(`time\s*(>=|<=|=|>|<)\s*cast\('([^']+)'\s+as\s+timestamp\)`)
+		timestampRegex := regexp.MustCompile(`(?i)time\s*(>=|<=|=|>|<)\s*cast\('([^']+)'\s+as\s+timestamp\)`)
 		restOfQuery = timestampRegex.ReplaceAllString(restOfQuery, "time $1 epoch_ns('$2'::TIMESTAMP)")
 
 		log.Printf("Modified query part: %s", restOfQuery)
@@ -926,6 +1040,12 @@ func (c *QueryClient) Query(ctx context.Context, query, dbName string) ([]map[st
 	}
 
 	return result, nil
+}
+
+// QueryArrow executes a query against DuckDB and returns an Arrow RecordReader and schema
+func (c *QueryClient) QueryArrow(ctx context.Context, query string) (array.RecordReader, *arrow.Schema, error) {
+	// TODO: Implement Arrow streaming for the current DuckDB Go driver version
+	return nil, nil, fmt.Errorf("Arrow streaming not implemented for this DuckDB Go driver version")
 }
 
 // Close releases resources
