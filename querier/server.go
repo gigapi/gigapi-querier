@@ -202,6 +202,12 @@ func (s *Server) HandleQuery(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// HandleInfluxDB3Query handles the /api/v3/query_sql endpoint for InfluxDB3 compatibility
+func (s *Server) HandleInfluxDB3Query(w http.ResponseWriter, r *http.Request) {
+	// Simply delegate to the existing HandleQuery method
+	s.HandleQuery(w, r)
+}
+
 // Send an error response in JSON format
 func sendErrorResponse(w http.ResponseWriter, message string, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")

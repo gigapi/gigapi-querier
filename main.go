@@ -71,6 +71,7 @@ func main() {
 	mux.HandleFunc("/", server.HandleUI) // Serve UI at root path
 	mux.HandleFunc("/health", server.HandleHealth)
 	mux.HandleFunc("/query", server.HandleQuery)
+	mux.HandleFunc("/api/v3/query_sql", server.HandleInfluxDB3Query) // InfluxDB3 compatibility endpoint
 
 	// Start main server
 	core.Infof(ctx, "GigAPI server running at http://localhost:%d", port)
