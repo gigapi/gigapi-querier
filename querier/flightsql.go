@@ -6,13 +6,8 @@ import (
 	"log"
 	"net"
 	"regexp"
-	"sort"
 	"strings"
-	"sync"
-	"time"
-
-	"github.com/apache/arrow-go/v18/arrow"
-	"github.com/apache/arrow-go/v18/arrow/array"
+	"encoding/base64"
 	"github.com/apache/arrow-go/v18/arrow/flight"
 	"github.com/apache/arrow-go/v18/arrow/flight/flightsql"
 	flightgen "github.com/apache/arrow-go/v18/arrow/flight/gen/flight"
@@ -31,9 +26,6 @@ type FlightSQLServer struct {
 	flightsql.BaseServer
 	queryClient *QueryClient
 	mem         memory.Allocator
-	// Add result storage
-	results     map[string]arrow.Record
-	resultsLock sync.RWMutex
 }
 
 // mustEmbedUnimplementedFlightServiceServer implements the FlightServiceServer interface
@@ -44,7 +36,6 @@ func NewFlightSQLServer(queryClient *QueryClient) *FlightSQLServer {
 	return &FlightSQLServer{
 		queryClient: queryClient,
 		mem:         memory.DefaultAllocator,
-		results:     make(map[string]arrow.Record),
 	}
 }
 
@@ -104,26 +95,19 @@ func (s *FlightSQLServer) GetFlightInfo(ctx context.Context, desc *flight.Flight
 	log.Printf("GetFlightInfo called with descriptor type: %v, path: %v, cmd: %v",
 		desc.Type, desc.Path, string(desc.Cmd))
 
-	// Handle SQL query command
 	if desc.Type == flight.DescriptorCMD {
-		// Unmarshal the Any message
 		any := &anypb.Any{}
 		if err := proto.Unmarshal(desc.Cmd, any); err != nil {
 			log.Printf("Failed to unmarshal Any message: %v", err)
 			return nil, fmt.Errorf("failed to unmarshal command: %w", err)
 		}
-
-		// Check if this is a CommandStatementQuery
 		if any.TypeUrl == "type.googleapis.com/arrow.flight.protocol.sql.CommandStatementQuery" {
-			// The query is in the Any message's value
 			query := string(any.Value)
-			// Clean up the query string
 			query = strings.TrimSpace(query)
 			query = strings.ReplaceAll(query, "\n", " ")
 			query = strings.ReplaceAll(query, "\r", " ")
-			query = strings.ReplaceAll(query, "\b", "") // Remove backspace characters
+			query = strings.ReplaceAll(query, "\b", "")
 			query = regexp.MustCompile(`\s+`).ReplaceAllString(query, " ")
-			// Remove any non-printable characters
 			query = strings.Map(func(r rune) rune {
 				if r < 32 || r > 126 {
 					return -1
@@ -132,7 +116,7 @@ func (s *FlightSQLServer) GetFlightInfo(ctx context.Context, desc *flight.Flight
 			}, query)
 			log.Printf("Executing SQL query: %v", query)
 
-			dbName := "default" // Default database name
+			dbName := "default"
 			if md, ok := metadata.FromIncomingContext(ctx); ok {
 				if bucket := md.Get("bucket"); len(bucket) > 0 {
 					dbName = bucket[0]
@@ -146,140 +130,71 @@ func (s *FlightSQLServer) GetFlightInfo(ctx context.Context, desc *flight.Flight
 				}
 			}
 
-			// Use QueryClient.Query which now handles all fallback logic
-			results, err := s.queryClient.Query(ctx, query, dbName)
+			parsed, err := s.queryClient.ParseQuery(query, dbName)
 			if err != nil {
-				log.Printf("Query execution failed: %v", err)
-				return nil, fmt.Errorf("failed to execute query: %w", err)
+				log.Printf("Failed to parse query: %v", err)
+				return nil, fmt.Errorf("failed to parse query: %w", err)
+			}
+			// Find relevant files (side effect: ensures query is valid)
+			_, err = s.queryClient.FindRelevantFiles(ctx, parsed.DbName, parsed.Measurement, parsed.TimeRange)
+			if err != nil {
+				log.Printf("Failed to find relevant files: %v", err)
+				return nil, fmt.Errorf("failed to find relevant files: %w", err)
 			}
 
-			// Convert results to Arrow format
-			_, recordBatch, err := convertResultsToArrow(results)
-			if err != nil {
-				log.Printf("Failed to convert results to Arrow format: %v", err)
-				return nil, fmt.Errorf("failed to convert results to Arrow format: %w", err)
-			}
-
-			// Generate a unique ticket
-			ticketID := fmt.Sprintf("query-%d", time.Now().UnixNano())
-
-			// Store the results
-			s.resultsLock.Lock()
-			s.results[ticketID] = recordBatch
-			s.resultsLock.Unlock()
-
-			// Create a ticket for the results
+			// Encode the query and dbName as a ticket (base64)
+			ticketPayload := fmt.Sprintf("%s|%s", dbName, query)
 			ticket := &flight.Ticket{
-				Ticket: []byte(ticketID),
+				Ticket: []byte(base64.StdEncoding.EncodeToString([]byte(ticketPayload))),
 			}
 
-			// Create the flight info
 			info := &flight.FlightInfo{
 				FlightDescriptor: desc,
-				Endpoint: []*flight.FlightEndpoint{
-					{
-						Ticket: ticket,
-						Location: []*flight.Location{
-							{
-								Uri: "grpc://localhost:8082",
-							},
-						},
-					},
-				},
-				TotalRecords: recordBatch.NumRows(),
+				Endpoint: []*flight.FlightEndpoint{{
+					Ticket: ticket,
+					Location: []*flight.Location{{Uri: "grpc://localhost:8082"}},
+				}},
+				TotalRecords: -1, // Unknown until DoGet
 				TotalBytes:   -1,
-				Schema:       []byte{}, // Empty schema, will be sent in DoGet
+				Schema:       []byte{},
 			}
-
-			log.Printf("Returning flight info with %d records", recordBatch.NumRows())
 			return info, nil
 		}
 	}
-
-	// For now, we don't support any other flight info requests
 	return nil, fmt.Errorf("unsupported flight descriptor type: %v", desc.Type)
-}
-
-// GetFlightInfoStatement implements the FlightSQL server interface for executing SQL statements
-func (s *FlightSQLServer) GetFlightInfoStatement(ctx context.Context, cmd *flightsql.StatementQuery, desc *flight.FlightDescriptor) (*flight.FlightInfo, error) {
-	log.Printf("GetFlightInfoStatement called with descriptor type: %v, path: %v, cmd: %v",
-		desc.Type, desc.Path, string(desc.Cmd))
-
-	// Extract query from command
-	query := string(desc.Cmd)
-
-	// Execute the query using our existing QueryClient
-	results, err := s.queryClient.Query(ctx, query, "default") // Using default database for now
-	if err != nil {
-		log.Printf("Query execution failed: %v", err)
-		return nil, fmt.Errorf("failed to execute query: %w", err)
-	}
-
-	// Convert results to Arrow format
-	_, recordBatch, err := convertResultsToArrow(results)
-	if err != nil {
-		log.Printf("Failed to convert results to Arrow format: %v", err)
-		return nil, fmt.Errorf("failed to convert results to Arrow format: %w", err)
-	}
-
-	// Create a ticket for the results
-	ticket := &flight.Ticket{
-		Ticket: []byte("query-results"),
-	}
-
-	// Create the flight info
-	info := &flight.FlightInfo{
-		FlightDescriptor: desc,
-		Endpoint: []*flight.FlightEndpoint{
-			{
-				Ticket: ticket,
-				Location: []*flight.Location{
-					{
-						Uri: "grpc://localhost:8082",
-					},
-				},
-			},
-		},
-		TotalRecords: recordBatch.NumRows(),
-		TotalBytes:   -1,
-		Schema:       []byte{}, // Empty schema, will be sent in DoGet
-	}
-
-	log.Printf("Returning flight info with %d records", recordBatch.NumRows())
-	return info, nil
 }
 
 // DoGet implements the FlightSQL server interface for retrieving data
 func (s *FlightSQLServer) DoGet(ticket *flight.Ticket, stream flight.FlightService_DoGetServer) error {
 	log.Printf("DoGet called with ticket: %v", string(ticket.Ticket))
-
-	// Get the results from storage
-	s.resultsLock.RLock()
-	recordBatch, exists := s.results[string(ticket.Ticket)]
-	s.resultsLock.RUnlock()
-
-	if !exists {
-		return fmt.Errorf("no results found for ticket: %s", string(ticket.Ticket))
-	}
-
-	// Get the schema from the record batch
-	schema := recordBatch.Schema()
-
-	// Write the schema
-	writer := flight.NewRecordWriter(stream, ipc.WithSchema(schema))
-	err := writer.Write(recordBatch)
+	decoded, err := base64.StdEncoding.DecodeString(string(ticket.Ticket))
 	if err != nil {
-		log.Printf("Failed to write record batch: %v", err)
-		return fmt.Errorf("failed to write record batch: %w", err)
+		return fmt.Errorf("invalid ticket encoding: %w", err)
 	}
+	parts := strings.SplitN(string(decoded), "|", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid ticket format")
+	}
+	// dbName := parts[0] // Unused
+	query := parts[1]
 
-	// Clean up the stored results
-	s.resultsLock.Lock()
-	delete(s.results, string(ticket.Ticket))
-	s.resultsLock.Unlock()
+	// Use the Arrow-native QueryArrow method
+	arrowReader, schema, err := s.queryClient.QueryArrow(stream.Context(), query)
+	if err != nil {
+		return fmt.Errorf("arrow query failed: %w", err)
+	}
+	defer arrowReader.Release()
 
-	log.Printf("Successfully wrote record batch with %d rows", recordBatch.NumRows())
-	return writer.Close()
+	writer := flight.NewRecordWriter(stream, ipc.WithSchema(schema))
+	defer writer.Close()
+
+	for arrowReader.Next() {
+		rec := arrowReader.Record()
+		if err := writer.Write(rec); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // DoPut implements the FlightService interface
@@ -301,157 +216,6 @@ func (s *FlightSQLServer) DoExchange(stream flight.FlightService_DoExchangeServe
 	log.Printf("DoExchange called")
 	// We don't support exchange yet
 	return fmt.Errorf("exchange not supported")
-}
-
-// convertResultsToArrow converts our query results to Arrow format
-func convertResultsToArrow(results []map[string]interface{}) (*arrow.Schema, arrow.Record, error) {
-	if len(results) == 0 {
-		return nil, nil, fmt.Errorf("no results to convert")
-	}
-
-	// Get column names from the first row, ensuring "time" is first
-	var columnNames []string
-	hasTime := false
-	for columnName := range results[0] {
-		if columnName == "time" {
-			hasTime = true
-			continue
-		}
-		columnNames = append(columnNames, columnName)
-	}
-	sort.Strings(columnNames)
-	if hasTime {
-		columnNames = append([]string{"time"}, columnNames...)
-	}
-
-	// Create schema fields
-	fields := make([]arrow.Field, len(columnNames))
-	for i, columnName := range columnNames {
-		dataType := inferTypeFromColumn(columnName, results)
-		fields[i] = arrow.Field{Name: columnName, Type: dataType, Nullable: true}
-	}
-	schema := arrow.NewSchema(fields, nil)
-
-	// Create builders for each column
-	builders := make([]array.Builder, len(columnNames))
-	for i, field := range schema.Fields() {
-		builders[i] = array.NewBuilder(memory.DefaultAllocator, field.Type)
-	}
-
-	// Populate builders with data
-	for _, row := range results {
-		for i, columnName := range columnNames {
-			value := row[columnName]
-			if value == nil {
-				builders[i].AppendNull()
-				continue
-			}
-
-			switch builder := builders[i].(type) {
-			case *array.TimestampBuilder:
-				switch value.(type) {
-				case int64:
-					ts := value.(int64)
-					builder.Append(arrow.Timestamp(ts))
-				case string:
-					str := value.(string)
-					if ts, err := parseTimestamp(str); err == nil {
-						builder.Append(arrow.Timestamp(ts))
-					} else {
-						builder.AppendNull()
-					}
-				default:
-					builder.AppendNull()
-				}
-			case *array.Int64Builder:
-				if v, ok := value.(int64); ok {
-					builder.Append(v)
-				} else {
-					builder.AppendNull()
-				}
-			case *array.Float64Builder:
-				if v, ok := value.(float64); ok {
-					builder.Append(v)
-				} else {
-					builder.AppendNull()
-				}
-			case *array.BooleanBuilder:
-				if v, ok := value.(bool); ok {
-					builder.Append(v)
-				} else {
-					builder.AppendNull()
-				}
-			case *array.StringBuilder:
-				if v, ok := value.(string); ok {
-					builder.Append(v)
-				} else {
-					builder.Append(fmt.Sprintf("%v", value))
-				}
-			default:
-				return nil, nil, fmt.Errorf("unsupported builder type for column %s", columnName)
-			}
-		}
-	}
-
-	// Create arrays from builders
-	arrays := make([]arrow.Array, len(builders))
-	for i, builder := range builders {
-		arrays[i] = builder.NewArray()
-		defer arrays[i].Release()
-		builder.Release()
-	}
-
-	// Create record
-	record := array.NewRecord(schema, arrays, int64(len(results)))
-	return schema, record, nil
-}
-
-func parseTimestamp(s string) (int64, error) {
-	formats := []string{
-		time.RFC3339,
-		time.RFC3339Nano,
-		"2006-01-02 15:04:05",
-		"2006-01-02T15:04:05",
-		"2006-01-02 15:04:05.999999999",
-		"2006-01-02T15:04:05.999999999",
-	}
-
-	for _, format := range formats {
-		if t, err := time.Parse(format, s); err == nil {
-			return t.UnixNano(), nil
-		}
-	}
-	return 0, fmt.Errorf("could not parse timestamp: %s", s)
-}
-
-// inferTypeFromColumn attempts to infer the Arrow type for a column by looking at non-null values
-func inferTypeFromColumn(columnName string, results []map[string]interface{}) arrow.DataType {
-	// Time-related columns should always be timestamps
-	if columnName == "time" || columnName == "time_str" || columnName == "time_int" {
-		return &arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: "UTC"}
-	}
-
-	// For other columns, infer type from the first non-nil value
-	for _, row := range results {
-		if value, exists := row[columnName]; exists && value != nil {
-			switch value.(type) {
-			case int64:
-				return arrow.PrimitiveTypes.Int64
-			case float64:
-				return arrow.PrimitiveTypes.Float64
-			case bool:
-				return arrow.FixedWidthTypes.Boolean
-			case string:
-				return arrow.BinaryTypes.String
-			default:
-				// If we encounter an unknown type, convert it to string
-				return arrow.BinaryTypes.String
-			}
-		}
-	}
-
-	// If all values are nil, default to string type
-	return arrow.BinaryTypes.String
 }
 
 var s *grpc.Server
